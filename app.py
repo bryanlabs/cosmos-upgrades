@@ -6,7 +6,7 @@ from random import shuffle
 import traceback
 # import logging
 import threading
-from flask import Flask, jsonify, request, Response
+from flask import Flask, jsonify, Response
 from flask_caching import Cache
 from concurrent.futures import ThreadPoolExecutor
 from time import sleep
@@ -89,7 +89,7 @@ def fetch_repo():
 
     if os.path.exists(repo_dir):
         old_wd = os.getcwd()
-        print(f"Repository already exists. Fetching and pulling latest changes...")
+        print("Repository already exists. Fetching and pulling latest changes...")
         try:
             # Navigate to the repo directory
             os.chdir(repo_dir)
@@ -144,7 +144,7 @@ def is_rpc_endpoint_healthy(endpoint):
         if response.status_code != 200:
             response = requests.get(f"{endpoint}/health", timeout=1, verify=False)
         return response.status_code == 200
-    except:
+    except Exception:
         return False
 
 def is_rest_endpoint_healthy(endpoint):
@@ -158,7 +158,7 @@ def is_rest_endpoint_healthy(endpoint):
                 verify=False,
             )
         return response.status_code == 200
-    except:
+    except Exception:
         return False
 
 def get_latest_block_height_rpc(rpc_url):
@@ -280,7 +280,7 @@ def fetch_endpoints(network, base_url):
 def fetch_active_upgrade_proposals(rest_url, network, network_repo_url):
     try:
         [plan_name, version, height] = fetch_active_upgrade_proposals_v1(rest_url, network, network_repo_url)
-    except RequiresGovV1Exception as e:
+    except RequiresGovV1Exception:
         [plan_name, version, height] = fetch_active_upgrade_proposals_v1(rest_url, network, network_repo_url)
     except Exception as e:
         raise e
@@ -303,7 +303,7 @@ def fetch_active_upgrade_proposals_v1beta1(rest_url, network, network_repo_url):
             response_json = {}
             try:
                 response_json = response.json()
-            except:
+            except Exception:
                 pass
             if "message" in response_json and "can't convert" in response_json["message"]:
                 raise RequiresGovV1Exception("gov v1 is required")
@@ -484,7 +484,7 @@ def get_network_repo_semver_tags(network, network_repo_url):
             else:
                 version = semantic_version.Version(tag)
             network_repo_semver_tags.append(version)
-        except Exception as e:
+        except Exception:
             pass
 
     return network_repo_semver_tags
@@ -657,7 +657,7 @@ def fetch_data_for_network(network, network_type, repo_path):
                 active_upgrade_height,
             ) = fetch_active_upgrade_proposals(current_endpoint, network, network_repo_url)
 
-        except Exception as e:
+        except Exception:
             (
                 active_upgrade_name,
                 active_upgrade_version,
@@ -672,7 +672,7 @@ def fetch_data_for_network(network, network_type, repo_path):
                 current_upgrade_height,
                 current_plan_dump,
             ) = fetch_current_upgrade_plan(current_endpoint, network, network_repo_url)
-        except:
+        except Exception:
             (
                 current_upgrade_name,
                 current_upgrade_version,
@@ -729,7 +729,7 @@ def fetch_data_for_network(network, network_type, repo_path):
             try:
                 info = json.loads(upgrade_plan.get("info", "{}"))
                 binaries = info.get("binaries", {})
-            except:
+            except Exception:
                 print(f"Failed to parse binaries for network {network}. Non-fatal error, skipping...")
                 pass
 
