@@ -1,32 +1,39 @@
-# Use an official Python runtime as a parent image
-FROM python:3.9-slim
+# Use a Python image with uv pre-installed
+FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim
 
-# Set environment variables
-# Prevents Python from writing pyc files to disc (equivalent to python -B option)
-ENV PYTHONDONTWRITEBYTECODE 1
-# Prevents Python from buffering stdout and stderr (equivalent to python -u option)
-ENV PYTHONUNBUFFERED 1
-
-# Set the working directory inside the container
+# Install the project into `/app`
 WORKDIR /app
 
-# Install system dependencies
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    gcc \
-    git \
-    libpq-dev \
-    && apt-get clean && rm -rf /var/lib/apt/lists/*
+# Enable bytecode compilation
+ENV UV_COMPILE_BYTECODE=1
 
-# Install Python dependencies
-COPY requirements.txt /app/
-RUN pip install --no-cache-dir -r requirements.txt
+# Copy from the cache instead of linking since it's a mounted volume
+ENV UV_LINK_MODE=copy
 
-# Copy the Flask app files into the container
-COPY . /app/
+# Install the project's dependencies using the lockfile and settings
+RUN --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=bind,source=uv.lock,target=uv.lock \
+    --mount=type=bind,source=pyproject.toml,target=pyproject.toml \
+    uv sync --frozen --no-install-project --no-dev
 
-# Expose port 5000 for the Flask app to listen on when running within the container
+# Then, add the rest of the project source code and install it
+# Installing separately from its dependencies allows optimal layer caching
+ADD . /app
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --frozen --no-dev
+
+# Place executables in the environment at the front of the path
+ENV PATH="/app/.venv/bin:$PATH"
+
+# Copy the Flask application code to the container
+COPY . .
+
+# Expose the port on which your Flask app will run
 EXPOSE 5000
 
-# Define the command to start the container. Use gunicorn as the WSGI server to serve the Flask app
 # CMD ["gunicorn", "--bind", "0.0.0.0:5000", "app:app"]
-CMD ["python", "app.py"]
+
+ENTRYPOINT [ "uv" ]
+
+# # Command to run the Flask application
+CMD [ "run", "gunicorn", "--bind", "0.0.0.0:5000", "app:app"]
