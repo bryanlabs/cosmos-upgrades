@@ -4,6 +4,7 @@ from datetime import datetime
 from datetime import timedelta
 from random import shuffle
 import traceback
+
 # import logging
 import threading
 from flask import Flask, jsonify, Response
@@ -22,9 +23,7 @@ app = Flask(__name__)
 # logging.basicConfig(filename='app.log', level=print, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # Suppress only the single InsecureRequestWarning from urllib3
-requests.packages.urllib3.disable_warnings(
-    requests.packages.urllib3.exceptions.InsecureRequestWarning
-)
+requests.packages.urllib3.disable_warnings(requests.packages.urllib3.exceptions.InsecureRequestWarning)
 
 # Initialize cache
 cache = Cache(app, config={"CACHE_TYPE": "simple"})
@@ -58,8 +57,10 @@ TESTNET_DATA = []
 
 SEMANTIC_VERSION_PATTERN = re.compile(r"(v\d+(?:\.\d+){0,2})")
 
+
 class RequiresGovV1Exception(Exception):
     pass
+
 
 # Explicit list of chains to pull data from
 def get_chain_watch_env_var():
@@ -68,10 +69,7 @@ def get_chain_watch_env_var():
     chain_watch.split(" ")
 
     if len(chain_watch) > 0:
-        print(
-            "CHAIN_WATCH env variable set, gathering data and watching for these chains: "
-            + chain_watch
-        )
+        print("CHAIN_WATCH env variable set, gathering data and watching for these chains: " + chain_watch)
     else:
         print("CHAIN_WATCH env variable not set, gathering data for all chains")
 
@@ -147,6 +145,7 @@ def is_rpc_endpoint_healthy(endpoint):
     except Exception:
         return False
 
+
 def is_rest_endpoint_healthy(endpoint):
     try:
         response = requests.get(f"{endpoint}/health", timeout=1, verify=False)
@@ -161,6 +160,7 @@ def is_rest_endpoint_healthy(endpoint):
     except Exception:
         return False
 
+
 def get_latest_block_height_rpc(rpc_url):
     """Fetch the latest block height from the RPC endpoint."""
     try:
@@ -169,11 +169,9 @@ def get_latest_block_height_rpc(rpc_url):
         data = response.json()
 
         if "result" in data.keys():
-             data = data["result"]
+            data = data["result"]
 
-        return int(
-            data.get("sync_info", {}).get("latest_block_height", 0)
-        )
+        return int(data.get("sync_info", {}).get("latest_block_height", 0))
 
     # RPC endpoints can return a 200 but not JSON (usually an HTML error page due to throttling or some other error)
     # Catch everything instead of just requests.RequestException
@@ -190,7 +188,7 @@ def get_block_time_rpc(rpc_url, height, allow_retry=False):
         data = response.json()
 
         if "result" in data.keys():
-             data = data["result"]
+            data = data["result"]
 
         return data.get("block", {}).get("header", {}).get("time", "")
     # RPC endpoints can return a 200 but not JSON (usually an HTML error page due to throttling or some other error)
@@ -204,7 +202,9 @@ def get_block_time_rpc(rpc_url, height, allow_retry=False):
                 error_message = json.loads(response.content)
                 if "lowest height is " in error_message.get("error", {}).get("data", ""):
                     print("Reattempting block height request with lowest height data from previous response")
-                    height = int(error_message.get("error", {}).get("data", "").split("lowest height is ")[1].strip()) + 20
+                    height = (
+                        int(error_message.get("error", {}).get("data", "").split("lowest height is ")[1].strip()) + 20
+                    )
                     response = requests.get(f"{rpc_url}/block?height={height}", timeout=1)
                     response.raise_for_status()
                     data = response.json()
@@ -252,11 +252,7 @@ def reorder_data(data):
 
 def fetch_all_endpoints(network_type, base_url, request_data):
     """Fetch all the REST and RPC endpoints for all networks and store in a map."""
-    networks = (
-        request_data.get("MAINNETS", [])
-        if network_type == "mainnet"
-        else request_data.get("TESTNETS", [])
-    )
+    networks = request_data.get("MAINNETS", []) if network_type == "mainnet" else request_data.get("TESTNETS", [])
     endpoints_map = {}
     for network in networks:
         rest_endpoints, rpc_endpoints = fetch_endpoints(network, base_url)
@@ -276,7 +272,8 @@ def fetch_endpoints(network, base_url):
         return rest_endpoints, rpc_endpoints
     except requests.RequestException:
         return [], []
-    
+
+
 def fetch_active_upgrade_proposals(rest_url, network, network_repo_url):
     try:
         [plan_name, version, height] = fetch_active_upgrade_proposals_v1(rest_url, network, network_repo_url)
@@ -284,15 +281,13 @@ def fetch_active_upgrade_proposals(rest_url, network, network_repo_url):
         [plan_name, version, height] = fetch_active_upgrade_proposals_v1(rest_url, network, network_repo_url)
     except Exception as e:
         raise e
-    
+
     return plan_name, version, height
 
 
 def fetch_active_upgrade_proposals_v1beta1(rest_url, network, network_repo_url):
     try:
-        response = requests.get(
-            f"{rest_url}/cosmos/gov/v1beta1/proposals?proposal_status=2", verify=False
-        )
+        response = requests.get(f"{rest_url}/cosmos/gov/v1beta1/proposals?proposal_status=2", verify=False)
 
         # Handle 501 Server Error
         if response.status_code == 501:
@@ -315,10 +310,8 @@ def fetch_active_upgrade_proposals_v1beta1(rest_url, network, network_repo_url):
             content = proposal.get("content", {})
             proposal_type = content.get("@type")
             if (
-                proposal_type
-                == "/cosmos.upgrade.v1beta1.SoftwareUpgradeProposal" or
-                proposal_type
-                == '/cosmos.upgrade.v1beta1.MsgSoftwareUpgrade'
+                proposal_type == "/cosmos.upgrade.v1beta1.SoftwareUpgradeProposal"
+                or proposal_type == "/cosmos.upgrade.v1beta1.MsgSoftwareUpgrade"
             ):
                 # Extract version from the plan name
                 plan = content.get("plan", {})
@@ -347,16 +340,13 @@ def fetch_active_upgrade_proposals_v1beta1(rest_url, network, network_repo_url):
     except RequiresGovV1Exception as e:
         raise e
     except Exception as e:
-        print(
-            f"Unhandled error while requesting active upgrade endpoint from {rest_url}: {e}"
-        )
+        print(f"Unhandled error while requesting active upgrade endpoint from {rest_url}: {e}")
         raise e
-    
+
+
 def fetch_active_upgrade_proposals_v1(rest_url, network, network_repo_url):
     try:
-        response = requests.get(
-            f"{rest_url}/cosmos/gov/v1/proposals?proposal_status=2", verify=False
-        )
+        response = requests.get(f"{rest_url}/cosmos/gov/v1/proposals?proposal_status=2", verify=False)
 
         # Handle 501 Server Error
         if response.status_code == 501:
@@ -371,10 +361,8 @@ def fetch_active_upgrade_proposals_v1(rest_url, network, network_repo_url):
             for message in messages:
                 proposal_type = message.get("@type")
                 if (
-                    proposal_type
-                    == "/cosmos.upgrade.v1beta1.SoftwareUpgradeProposal" or
-                    proposal_type
-                    == '/cosmos.upgrade.v1beta1.MsgSoftwareUpgrade'
+                    proposal_type == "/cosmos.upgrade.v1beta1.SoftwareUpgradeProposal"
+                    or proposal_type == "/cosmos.upgrade.v1beta1.MsgSoftwareUpgrade"
                 ):
                     # Extract version from the plan name
                     plan = message.get("plan", {})
@@ -401,16 +389,13 @@ def fetch_active_upgrade_proposals_v1(rest_url, network, network_repo_url):
         print(f"Error received from server {rest_url}: {e}")
         raise e
     except Exception as e:
-        print(
-            f"Unhandled error while requesting active upgrade endpoint from {rest_url}: {e}"
-        )
+        print(f"Unhandled error while requesting active upgrade endpoint from {rest_url}: {e}")
         raise e
+
 
 def fetch_current_upgrade_plan(rest_url, network, network_repo_url):
     try:
-        response = requests.get(
-            f"{rest_url}/cosmos/upgrade/v1beta1/current_plan", verify=False
-        )
+        response = requests.get(f"{rest_url}/cosmos/upgrade/v1beta1/current_plan", verify=False)
         response.raise_for_status()
         data = response.json()
 
@@ -439,10 +424,9 @@ def fetch_current_upgrade_plan(rest_url, network, network_repo_url):
         print(f"Error received from server {rest_url}: {e}")
         raise e
     except Exception as e:
-        print(
-            f"Unhandled error while requesting current upgrade endpoint from {rest_url}: {e}"
-        )
+        print(f"Unhandled error while requesting current upgrade endpoint from {rest_url}: {e}")
         raise e
+
 
 def fetch_network_repo_tags(network, network_repo):
     if "github.com" in network_repo:
@@ -466,18 +450,19 @@ def fetch_network_repo_tags(network, network_repo):
         print(f"Could not fetch tags from github for network {network}: unsupported repo url {network_repo}")
         return []
 
+
 def get_network_repo_semver_tags(network, network_repo_url):
     cached_tags = cache.get(network_repo_url + "_tags")
     if not cached_tags:
         network_repo_tag_strings = fetch_network_repo_tags(network, network_repo_url)
-        #cache response from network repo url to reduce api calls to whatever service is hosting the repo
+        # cache response from network repo url to reduce api calls to whatever service is hosting the repo
         cache.set(network_repo_url + "_tags", network_repo_tag_strings, timeout=600)
     else:
         network_repo_tag_strings = cached_tags
 
     network_repo_semver_tags = []
     for tag in network_repo_tag_strings:
-        #only use semantic version tags
+        # only use semantic version tags
         try:
             if tag.startswith("v"):
                 version = semantic_version.Version(tag[1:])
@@ -488,6 +473,7 @@ def get_network_repo_semver_tags(network, network_repo_url):
             pass
 
     return network_repo_semver_tags
+
 
 def find_best_semver_for_versions(network, network_version_strings, network_repo_semver_tags):
     if len(network_repo_semver_tags) == 0:
@@ -530,7 +516,7 @@ def find_best_semver_for_versions(network, network_version_strings, network_repo
 
         # currently just return the highest semver from the list of possible matches. This may be too naive
         if len(possible_semvers) != 0:
-            #sorting is built into the semantic version library
+            # sorting is built into the semantic version library
             possible_semvers.sort(reverse=True)
             semver = possible_semvers[0]
             return f"v{semver.major}.{semver.minor}.{semver.patch}"
@@ -541,6 +527,7 @@ def find_best_semver_for_versions(network, network_version_strings, network_repo
 
     return max(network_version_strings, key=len)
 
+
 def fetch_data_for_networks_wrapper(network, network_type, repo_path):
     """Wrapper function for fetching data for a given network. Prints the chain name that is erroring out for better visibility"""
     try:
@@ -548,6 +535,7 @@ def fetch_data_for_networks_wrapper(network, network_type, repo_path):
     except Exception as e:
         print(f"Error fetching data for network {network}: {e}")
         raise e
+
 
 def fetch_data_for_network(network, network_type, repo_path):
     """Fetch data for a given network."""
@@ -570,9 +558,9 @@ def fetch_data_for_network(network, network_type, repo_path):
     # Check if the chain.json file exists
     if not os.path.exists(chain_json_path):
         print(f"chain.json not found for network {network}. Skipping...")
-        err_output_data[
-            "error"
-        ] = f"insufficient data in Cosmos chain registry, chain.json not found for {network}. Consider a PR to cosmos/chain-registry"
+        err_output_data["error"] = (
+            f"insufficient data in Cosmos chain registry, chain.json not found for {network}. Consider a PR to cosmos/chain-registry"
+        )
         return err_output_data
 
     # Load the chain.json data
@@ -593,9 +581,9 @@ def fetch_data_for_network(network, network_type, repo_path):
         print(
             f"No healthy RPC endpoints found for network {network} while searching through {len(rpc_endpoints)} endpoints. Skipping..."
         )
-        err_output_data[
-            "error"
-        ] = f"insufficient data in Cosmos chain registry, no healthy RPC servers for {network}. Consider a PR to cosmos/chain-registry"
+        err_output_data["error"] = (
+            f"insufficient data in Cosmos chain registry, no healthy RPC servers for {network}. Consider a PR to cosmos/chain-registry"
+        )
         return err_output_data
 
     # Shuffle the healthy endpoints
@@ -613,18 +601,18 @@ def fetch_data_for_network(network, network_type, repo_path):
         print(
             f"No RPC endpoints returned latest height for network {network} while searching through {len(rpc_endpoints)} endpoints. Skipping..."
         )
-        err_output_data[
-            "error"
-        ] = f"insufficient data in Cosmos chain registry, no RPC servers returned latest block height for {network}. Consider a PR to cosmos/chain-registry"
+        err_output_data["error"] = (
+            f"insufficient data in Cosmos chain registry, no RPC servers returned latest block height for {network}. Consider a PR to cosmos/chain-registry"
+        )
         return err_output_data
 
     if len(healthy_rest_endpoints) == 0:
         print(
             f"No healthy REST endpoints found for network {network} while searching through {len(rest_endpoints)} endpoints. Skipping..."
         )
-        err_output_data[
-            "error"
-        ] = f"insufficient data in Cosmos chain registry, no healthy REST servers for {network}. Consider a PR to cosmos/chain-registry"
+        err_output_data["error"] = (
+            f"insufficient data in Cosmos chain registry, no healthy REST servers for {network}. Consider a PR to cosmos/chain-registry"
+        )
         err_output_data["latest_block_height"] = latest_block_height
         err_output_data["rpc_server"] = rpc_server_used
         return err_output_data
@@ -683,20 +671,14 @@ def fetch_data_for_network(network, network_type, repo_path):
 
         if active_upgrade_check_failed and upgrade_plan_check_failed:
             if index + 1 < len(healthy_rest_endpoints):
-                print(
-                    f"Failed to query rest endpoints {current_endpoint}, trying next rest endpoint"
-                )
+                print(f"Failed to query rest endpoints {current_endpoint}, trying next rest endpoint")
                 continue
             else:
-                print(
-                    f"Failed to query rest endpoints {current_endpoint}, all out of endpoints to try"
-                )
+                print(f"Failed to query rest endpoints {current_endpoint}, all out of endpoints to try")
                 break
 
         if active_upgrade_check_failed and network not in NETWORKS_NO_GOV_MODULE:
-            print(
-                f"Failed to query active upgrade endpoint {current_endpoint}, trying next rest endpoint"
-            )
+            print(f"Failed to query active upgrade endpoint {current_endpoint}, trying next rest endpoint")
             continue
 
         if (
@@ -773,22 +755,14 @@ def fetch_data_for_network(network, network_type, repo_path):
     if current_block_time and past_block_time:
         current_block_datetime = parse_isoformat_string(current_block_time)
         past_block_datetime = parse_isoformat_string(past_block_time)
-        avg_block_time_seconds = (
-            current_block_datetime - past_block_datetime
-        ).total_seconds() / 10000
+        avg_block_time_seconds = (current_block_datetime - past_block_datetime).total_seconds() / 10000
 
     # Estimate the upgrade time
     estimated_upgrade_time = None
     if upgrade_block_height and avg_block_time_seconds:
-        estimated_seconds_until_upgrade = avg_block_time_seconds * (
-            upgrade_block_height - latest_block_height
-        )
-        estimated_upgrade_datetime = datetime.utcnow() + timedelta(
-            seconds=estimated_seconds_until_upgrade
-        )
-        estimated_upgrade_time = estimated_upgrade_datetime.isoformat().replace(
-            "+00:00", "Z"
-        )
+        estimated_seconds_until_upgrade = avg_block_time_seconds * (upgrade_block_height - latest_block_height)
+        estimated_upgrade_datetime = datetime.utcnow() + timedelta(seconds=estimated_seconds_until_upgrade)
+        estimated_upgrade_time = estimated_upgrade_datetime.isoformat().replace("+00:00", "Z")
 
     output_data = {
         "network": network,
@@ -831,9 +805,7 @@ def update_data():
             mainnet_networks = [
                 d
                 for d in os.listdir(repo_path)
-                if os.path.isdir(os.path.join(repo_path, d))
-                and not d.startswith((".", "_"))
-                and d != "testnets"
+                if os.path.isdir(os.path.join(repo_path, d)) and not d.startswith((".", "_")) and d != "testnets"
             ]
 
             if len(CHAIN_WATCH) != 0:
@@ -843,8 +815,7 @@ def update_data():
             testnet_networks = [
                 d
                 for d in os.listdir(testnet_path)
-                if os.path.isdir(os.path.join(testnet_path, d))
-                and not d.startswith((".", "_"))
+                if os.path.isdir(os.path.join(testnet_path, d)) and not d.startswith((".", "_"))
             ]
 
             if len(CHAIN_WATCH) != 0:
@@ -855,9 +826,7 @@ def update_data():
                     filter(
                         None,
                         executor.map(
-                            lambda network, path: fetch_data_for_networks_wrapper(
-                                network, "testnet", path
-                            ),
+                            lambda network, path: fetch_data_for_networks_wrapper(network, "testnet", path),
                             testnet_networks,
                             [repo_path] * len(testnet_networks),
                         ),
@@ -867,9 +836,7 @@ def update_data():
                     filter(
                         None,
                         executor.map(
-                            lambda network, path: fetch_data_for_networks_wrapper(
-                                network, "mainnet", path
-                            ),
+                            lambda network, path: fetch_data_for_networks_wrapper(network, "mainnet", path),
                             mainnet_networks,
                             [repo_path] * len(mainnet_networks),
                         ),
@@ -880,12 +847,8 @@ def update_data():
             cache.set("MAINNET_DATA", mainnet_data)
             cache.set("TESTNET_DATA", testnet_data)
 
-            elapsed_time = (
-                datetime.now() - start_time
-            ).total_seconds()  # Calculate the elapsed time
-            print(
-                f"Data update cycle completed in {elapsed_time} seconds. Sleeping for 1 minute..."
-            )
+            elapsed_time = (datetime.now() - start_time).total_seconds()  # Calculate the elapsed time
+            print(f"Data update cycle completed in {elapsed_time} seconds. Sleeping for 1 minute...")
             sleep(60)
         except Exception as e:
             elapsed_time = (
@@ -907,6 +870,7 @@ def start_update_data_thread():
 def health_check():
     return jsonify(status="OK"), 200
 
+
 @app.route("/mainnets")
 # @cache.cached(timeout=600)  # Cache the result for 10 minutes
 def get_mainnet_data():
@@ -917,9 +881,7 @@ def get_mainnet_data():
     results = [r for r in results if r is not None]
     sorted_results = sorted(results, key=lambda x: x["upgrade_found"], reverse=True)
     reordered_results = [reorder_data(result) for result in sorted_results]
-    return Response(
-        json.dumps(reordered_results) + "\n", content_type="application/json"
-    )
+    return Response(json.dumps(reordered_results) + "\n", content_type="application/json")
 
 
 @app.route("/testnets")
@@ -932,9 +894,7 @@ def get_testnet_data():
     results = [r for r in results if r is not None]
     sorted_results = sorted(results, key=lambda x: x["upgrade_found"], reverse=True)
     reordered_results = [reorder_data(result) for result in sorted_results]
-    return Response(
-        json.dumps(reordered_results) + "\n", content_type="application/json"
-    )
+    return Response(json.dumps(reordered_results) + "\n", content_type="application/json")
 
 
 if __name__ == "__main__":
