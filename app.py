@@ -5,7 +5,7 @@ from datetime import timedelta
 from random import shuffle
 import traceback
 
-# import logging
+import logging
 import threading
 from flask import Flask, jsonify, Response
 from flask_caching import Cache
@@ -20,7 +20,7 @@ import semantic_version
 app = Flask(__name__)
 
 # Logging configuration
-# logging.basicConfig(filename='app.log', level=print, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
 # Suppress only the single InsecureRequestWarning from urllib3
 requests.packages.urllib3.disable_warnings(requests.packages.urllib3.exceptions.InsecureRequestWarning)
@@ -69,9 +69,9 @@ def get_chain_watch_env_var():
     chain_watch.split(" ")
 
     if len(chain_watch) > 0:
-        print("CHAIN_WATCH env variable set, gathering data and watching for these chains: " + chain_watch)
+        logger.info("CHAIN_WATCH env variable set, gathering data and watching for these chains: " + chain_watch)
     else:
-        print("CHAIN_WATCH env variable not set, gathering data for all chains")
+        logger.info("CHAIN_WATCH env variable not set, gathering data for all chains")
 
     return chain_watch
 
@@ -778,7 +778,7 @@ def fetch_data_for_network(network, network_type, repo_path):
         "estimated_upgrade_time": estimated_upgrade_time,
         "version": upgrade_version,
     }
-    print(f"Completed fetch data for network {network}")
+    logger.debug(f"Completed fetch data for network {network}")
     return output_data
 
 
@@ -788,15 +788,15 @@ def update_data():
 
     while True:
         start_time = datetime.now()  # Capture the start time
-        print("Starting data update cycle...")
+        logger.info("Starting data update cycle...")
 
         # Git clone or fetch & pull
         try:
             repo_path = fetch_repo()
-            print(f"Repo path: {repo_path}")
+            logger.info(f"Repo path: {repo_path}")
         except Exception as e:
-            print(f"Error downloading and extracting repo: {e}")
-            print("Error encountered. Sleeping for 5 seconds before retrying...")
+            logger.error(f"Error downloading and extracting repo: {e}")
+            logger.error("Error encountered. Sleeping for 5 seconds before retrying...")
             sleep(5)
             continue
 
@@ -848,15 +848,15 @@ def update_data():
             cache.set("TESTNET_DATA", testnet_data)
 
             elapsed_time = (datetime.now() - start_time).total_seconds()  # Calculate the elapsed time
-            print(f"Data update cycle completed in {elapsed_time} seconds. Sleeping for 1 minute...")
+            logger.info(f"Data update cycle completed in {elapsed_time} seconds. Sleeping for 1 minute...")
             sleep(60)
         except Exception as e:
             elapsed_time = (
                 datetime.now() - start_time
             ).total_seconds()  # Calculate the elapsed time in case of an error
             traceback.print_exc()
-            print(f"Error in update_data loop after {elapsed_time} seconds: {e}")
-            print("Error encountered. Sleeping for 1 minute before retrying...")
+            logger.error(f"Error in update_data loop after {elapsed_time} seconds: {e}")
+            logger.error("Error encountered. Sleeping for 1 minute before retrying...")
             sleep(60)
 
 

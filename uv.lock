@@ -57,6 +57,7 @@ dependencies = [
     { name = "flask" },
     { name = "flask-caching" },
     { name = "gunicorn" },
+    { name = "logging" },
     { name = "requests" },
     { name = "semantic-version" },
     { name = "urllib3" },
@@ -73,6 +74,7 @@ requires-dist = [
     { name = "flask", specifier = "==2.1.1" },
     { name = "flask-caching", specifier = "==2.0.2" },
     { name = "gunicorn", specifier = "==20.1.0" },
+    { name = "logging", specifier = ">=0.4.9.6" },
     { name = "requests", specifier = "==2.26.0" },
     { name = "semantic-version", specifier = "==2.10.0" },
     { name = "urllib3", specifier = "==1.26.7" },
@@ -151,6 +153,12 @@ sdist = { url = "https://files.pythonhosted.org/packages/af/92/b3130cbbf5591acf9
 wheels = [
     { url = "https://files.pythonhosted.org/packages/bd/0f/2ba5fbcd631e3e88689309dbe978c5769e883e4b84ebfe7da30b43275c5a/jinja2-3.1.5-py3-none-any.whl", hash = "sha256:aba0f4dc9ed8013c424088f68a5c226f7d6097ed89b246d7749c2ec4175c6adb", size = 134596 },
 ]
+
+[[package]]
+name = "logging"
+version = "0.4.9.6"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/93/4b/979db9e44be09f71e85c9c8cfc42f258adfb7d93ce01deed2788b2948919/logging-0.4.9.6.tar.gz", hash = "sha256:26f6b50773f085042d301085bd1bf5d9f3735704db9f37c1ce6d8b85c38f2417", size = 96029 }
 
 [[package]]
 name = "markupsafe"
