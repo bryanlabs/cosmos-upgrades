@@ -1,37 +1,39 @@
-# Stage 1: Install dependencies
-FROM python:3.9-alpine AS builder
+# Use a Python image with uv pre-installed
+FROM ghcr.io/astral-sh/uv:python3.13-bookworm-slim
 
-# Install build dependencies
-RUN apk add --no-cache gcc musl-dev libffi-dev openssl-dev git
-
-# Set working directory
+# Install the project into `/app`
 WORKDIR /app
 
-# Copy requirements and install dependencies
-COPY requirements.txt .
-RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
+# Enable bytecode compilation
+ENV UV_COMPILE_BYTECODE=1
 
-# Stage 2: Final image
-FROM python:3.9-alpine
+# Copy from the cache instead of linking since it's a mounted volume
+ENV UV_LINK_MODE=copy
 
-# Install runtime dependencies
-RUN apk add --no-cache git
+# Install the project's dependencies using the lockfile and settings
+RUN --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=bind,source=uv.lock,target=uv.lock \
+    --mount=type=bind,source=pyproject.toml,target=pyproject.toml \
+    uv sync --frozen --no-install-project --no-dev
 
-# Set environment variables
-ENV PYTHONDONTWRITEBYTECODE=1
-ENV PYTHONUNBUFFERED=1
+# Then, add the rest of the project source code and install it
+# Installing separately from its dependencies allows optimal layer caching
+ADD . /app
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --frozen --no-dev
 
-# Set working directory
-WORKDIR /app
+# Place executables in the environment at the front of the path
+ENV PATH="/app/.venv/bin:$PATH"
 
-# Copy installed dependencies from builder
-COPY --from=builder /install /usr/local
-
-# Copy application code
+# Copy the Flask application code to the container
 COPY . .
 
-# Expose port
+# Expose the port on which your Flask app will run
 EXPOSE 5000
 
-# Run the application
-CMD ["python", "app.py"]
+# CMD ["gunicorn", "--bind", "0.0.0.0:5000", "app:app"]
+
+ENTRYPOINT [ "uv" ]
+
+# # Command to run the Flask application
+CMD [ "run", "gunicorn", "--bind", "0.0.0.0:5000", "app:app"]
