@@ -1,6 +1,6 @@
 # cosmos-upgrades
 
-`cosmos-upgrades` is a powerful tool developed by [bryan Labs](https://github.com/bryanlabs) to search for scheduled Cosmos upgrades. This tool aims to streamline the process of tracking and managing upgrades in the Cosmos ecosystem.
+`cosmos-upgrades` is a powerful tool developed by [bryanlabs](https://github.com/bryanlabs) to search for scheduled Cosmos upgrades. This tool aims to streamline the process of tracking and managing upgrades in the Cosmos ecosystem.
 
 ## 🌌 Introduction
 
