@@ -1,6 +1,6 @@
 # cosmos-upgrades
 
-`cosmos-upgrades` is a powerful tool developed by [Defiant Labs](https://github.com/DefiantLabs) to search for scheduled Cosmos upgrades. This tool aims to streamline the process of tracking and managing upgrades in the Cosmos ecosystem.
+`cosmos-upgrades` is a powerful tool developed by [bryan Labs](https://github.com/bryanlabs) to search for scheduled Cosmos upgrades. This tool aims to streamline the process of tracking and managing upgrades in the Cosmos ecosystem.
 
 ## 🌌 Introduction
 
@@ -40,7 +40,7 @@ To fetch the scheduled upgrades, you can use the following `curl` command for bo
 ```bash
 curl -s -X GET \
   -H "Content-Type: application/json" \
-  https://cosmos-upgrades.apis.defiantlabs.net/mainnets
+  https://cosmos-upgrades.apis.bryanlabs.net/mainnets
 ```
 
 ### Testnets
@@ -48,7 +48,7 @@ curl -s -X GET \
 ```bash
 curl -s -X GET \
   -H "Content-Type: application/json" \
-  https://cosmos-upgrades.apis.defiantlabs.net/testnets
+  https://cosmos-upgrades.apis.bryanlabs.net/testnets
 ```
 
 **Note:** The response will contain details of the scheduled upgrades for the specified networks.
