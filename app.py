@@ -20,14 +20,23 @@ from loguru import logger
 
 app = Flask(__name__)
 
-# Configure loguru for colorized logging with network context
-logger.remove()  # Remove default logger
-logger.add(
-    sys.stderr,
-    format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <cyan>{extra[network]}</cyan> | <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>",
-    colorize=True,
-    level="INFO",  # Set default level to INFO
-)
+# Set log level based on environment variable
+LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
+logger.remove()
+if LOG_LEVEL == "DEBUG":
+    logger.add(
+        sys.stderr,
+        format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <cyan>{extra[network]}</cyan> | <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>",
+        colorize=True,
+        level=LOG_LEVEL,
+    )
+else:
+    logger.add(
+        sys.stderr,
+        format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <cyan>{extra[network]}</cyan> - <level>{message}</level>",
+        colorize=True,
+        level=LOG_LEVEL,
+    )
 
 # Suppress only the single InsecureRequestWarning from urllib3
 requests.packages.urllib3.disable_warnings(
@@ -558,7 +567,7 @@ def fetch_data_for_network(network, network_type, repo_path):
     healthy_rest_endpoints = get_healthy_rest_endpoints(rest_endpoints)
 
     if len(healthy_rpc_endpoints) == 0:
-        network_logger.info(
+        network_logger.error(
             "No healthy RPC endpoints found for network while searching through endpoints. Skipping...",
             rpc_endpoints=len(rpc_endpoints),
         )
@@ -574,7 +583,7 @@ def fetch_data_for_network(network, network_type, repo_path):
     rpc_server_used = ""
     for rpc_endpoint in healthy_rpc_endpoints:
         if not isinstance(rpc_endpoint, dict) or "address" not in rpc_endpoint:
-            network_logger.info("Invalid rpc endpoint format for network", rpc_endpoint=rpc_endpoint)
+            network_logger.debug("Invalid rpc endpoint format for network", rpc_endpoint=rpc_endpoint)
             continue
 
         latest_block_height = get_latest_block_height_rpc(rpc_endpoint["address"])
@@ -583,7 +592,7 @@ def fetch_data_for_network(network, network_type, repo_path):
             break
 
     if latest_block_height < 0:
-        network_logger.info(
+        network_logger.error(
             "No RPC endpoints returned latest height for network while searching through endpoints. Skipping...",
             rpc_endpoints=len(rpc_endpoints),
         )
@@ -593,7 +602,7 @@ def fetch_data_for_network(network, network_type, repo_path):
         return err_output_data
 
     if len(healthy_rest_endpoints) == 0:
-        network_logger.info(
+        network_logger.error(
             "No healthy REST endpoints found for network while searching through endpoints. Skipping...",
             rest_endpoints=len(rest_endpoints),
         )
@@ -604,7 +613,7 @@ def fetch_data_for_network(network, network_type, repo_path):
         err_output_data["rpc_server"] = rpc_server_used
         return err_output_data
 
-    network_logger.info(
+    network_logger.debug(
         "Found rest endpoints and rpc endpoints for network",
         rest_endpoints=len(healthy_rest_endpoints),
         rpc_endpoints=len(healthy_rpc_endpoints),
@@ -620,7 +629,7 @@ def fetch_data_for_network(network, network_type, repo_path):
     for rest_endpoint in healthy_rest_endpoints:  # Fix unpacking issue
         # Validate rest_endpoint format
         if not isinstance(rest_endpoint, dict) or "address" not in rest_endpoint:
-            network_logger.info("Invalid rest endpoint format for network", rest_endpoint=rest_endpoint)
+            network_logger.debug("Invalid rest endpoint format for network", rest_endpoint=rest_endpoint)
             continue
 
         current_endpoint = rest_endpoint["address"]
@@ -664,14 +673,14 @@ def fetch_data_for_network(network, network_type, repo_path):
             upgrade_plan_check_failed = True
 
         if active_upgrade_check_failed and upgrade_plan_check_failed:
-            network_logger.info(
+            network_logger.debug(
                 "Failed to query rest endpoints, trying next rest endpoint",
                 current_endpoint=current_endpoint,
             )
             continue
 
         if active_upgrade_check_failed and network not in NETWORKS_NO_GOV_MODULE:
-            network_logger.info(
+            network_logger.debug(
                 "Failed to query active upgrade endpoint, trying next rest endpoint",
                 current_endpoint=current_endpoint,
             )
@@ -708,7 +717,7 @@ def fetch_data_for_network(network, network_type, repo_path):
                 info = json.loads(upgrade_plan.get("info", "{}"))
                 binaries = info.get("binaries", {})
             except:
-                network_logger.info("Failed to parse binaries for network. Non-fatal error, skipping...")
+                network_logger.debug("Failed to parse binaries for network. Non-fatal error, skipping...")
                 pass
 
             plan_height = upgrade_plan.get("height", -1)
@@ -788,7 +797,7 @@ def fetch_data_for_network(network, network_type, repo_path):
         "logo_urls": logo_urls,
         "explorer_url": explorer_url,
     }
-    network_logger.info("Completed fetch data for network")
+    network_logger.debug("Completed fetch data for network")
     return output_data
 
 
