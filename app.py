@@ -57,8 +57,8 @@ TESTNET_DATA = []
 
 SEMANTIC_VERSION_PATTERN = re.compile(r"(v\d+(?:\.\d+){0,2})")
 
+PREFERRED_EXPLORERS = ["ping.pub", "mintscan.io", "nodes.guru"]
 
-# Explicit list of chains to pull data from
 def get_chain_watch_env_var():
     chain_watch = os.environ.get("CHAIN_WATCH", "")
 
@@ -469,6 +469,43 @@ def fetch_data_for_networks_wrapper(network, network_type, repo_path):
         print(f"Error fetching data for network {network}: {e}")
         raise e
 
+def is_explorer_healthy(url):
+    """Check if an explorer URL is healthy."""
+    try:
+        response = requests.get(url, timeout=2)
+        return response.status_code == 200
+    except:
+        return False
+
+def get_healthy_explorer(explorers):
+    """Return the healthiest explorer based on preferences."""
+    for preferred in PREFERRED_EXPLORERS:
+        for explorer in explorers:
+            if preferred in explorer["url"] and is_explorer_healthy(explorer["url"]):
+                return explorer
+
+    # If no preferred explorer is healthy, return the first healthy one
+    for explorer in explorers:
+        if is_explorer_healthy(explorer["url"]):
+            return explorer
+
+    # If no explorers are healthy, return None
+    return None
+
+def fetch_logo_urls(data):
+    """Fetch logo URLs from the chain registry data."""
+    logo_uris = data.get("logo_URIs", {})
+    return {
+        "png": logo_uris.get("png"),
+        "svg": logo_uris.get("svg")
+    }
+
+def fetch_explorer_urls(data):
+    """Fetch and filter explorer URLs from the chain registry data."""
+    explorers = data.get("explorers", [])
+    healthy_explorer = get_healthy_explorer(explorers)
+    return healthy_explorer
+
 def fetch_data_for_network(network, network_type, repo_path):
     """Fetch data for a given network."""
 
@@ -504,6 +541,12 @@ def fetch_data_for_network(network, network_type, repo_path):
     rest_endpoints = data.get("apis", {}).get("rest", [])
     rpc_endpoints = data.get("apis", {}).get("rpc", [])
 
+    # Fetch logo URLs
+    logo_urls = fetch_logo_urls(data)
+
+    # Fetch explorer URLs
+    explorer_url = fetch_explorer_urls(data)
+
     # Prioritize RPC endpoints for fetching the latest block height
     latest_block_height = -1
     healthy_rpc_endpoints = get_healthy_rpc_endpoints(rpc_endpoints)
@@ -524,6 +567,10 @@ def fetch_data_for_network(network, network_type, repo_path):
 
     rpc_server_used = ""
     for rpc_endpoint in healthy_rpc_endpoints:
+        if not isinstance(rpc_endpoint, dict) or "address" not in rpc_endpoint:
+            print(f"Invalid rpc endpoint format for network {network}: {rpc_endpoint}")
+            continue
+
         latest_block_height = get_latest_block_height_rpc(rpc_endpoint["address"])
         if latest_block_height > 0:
             rpc_server_used = rpc_endpoint["address"]
@@ -561,6 +608,10 @@ def fetch_data_for_network(network, network_type, repo_path):
     rest_server_used = ""
 
     for index, rest_endpoint in enumerate(healthy_rest_endpoints):
+        if not isinstance(rest_endpoint, dict) or "address" not in rest_endpoint:
+            print(f"Invalid rest endpoint format for network {network}: {rest_endpoint}")
+            continue
+
         current_endpoint = rest_endpoint["address"]
 
         if current_endpoint in SERVER_BLACKLIST:
@@ -677,7 +728,10 @@ def fetch_data_for_network(network, network_type, repo_path):
     past_block_time = None
     avg_block_time_seconds = None
     for rpc_endpoint in healthy_rpc_endpoints:
-        # Get average block time
+        if not isinstance(rpc_endpoint, dict) or "address" not in rpc_endpoint:
+            print(f"Invalid rpc endpoint format for network {network}: {rpc_endpoint}")
+            continue
+
         current_endpoint = rpc_endpoint["address"]
         current_block_time = get_block_time_rpc(current_endpoint, latest_block_height)
         past_block_time = get_block_time_rpc(current_endpoint, latest_block_height - 10000, allow_retry=True)
@@ -723,6 +777,8 @@ def fetch_data_for_network(network, network_type, repo_path):
         "upgrade_plan": output_data.get("upgrade_plan", None),
         "estimated_upgrade_time": estimated_upgrade_time,
         "version": upgrade_version,
+        "logo_urls": logo_urls,
+        "explorer_url": explorer_url,
     }
     print(f"Completed fetch data for network {network}")
     return output_data
@@ -836,7 +892,10 @@ def get_mainnet_data():
 
     results = [r for r in results if r is not None]
     sorted_results = sorted(results, key=lambda x: x["upgrade_found"], reverse=True)
-    reordered_results = [reorder_data(result) for result in sorted_results]
+    reordered_results = [
+        {**reorder_data(result), "logo_urls": result.get("logo_urls"), "explorer_url": result.get("explorer_url")}
+        for result in sorted_results
+    ]
     return Response(
         json.dumps(reordered_results) + "\n", content_type="application/json"
     )
@@ -851,7 +910,10 @@ def get_testnet_data():
 
     results = [r for r in results if r is not None]
     sorted_results = sorted(results, key=lambda x: x["upgrade_found"], reverse=True)
-    reordered_results = [reorder_data(result) for result in sorted_results]
+    reordered_results = [
+        {**reorder_data(result), "logo_urls": result.get("logo_urls"), "explorer_url": result.get("explorer_url")}
+        for result in sorted_results
+    ]
     return Response(
         json.dumps(reordered_results) + "\n", content_type="application/json"
     )
