@@ -532,13 +532,8 @@ def fetch_data_for_network(network, network_type, repo_path):
 
     # Skip networks in the blacklist
     if network.upper() in NETWORK_BLACKLIST:
-        network_logger.info("Network is in the blacklist. Skipping...")
-        return {
-            "network": network,
-            "type": network_type,
-            "error": "Network is blacklisted",
-            "upgrade_found": False,
-        }
+        network_logger.debug("Network is in the blacklist. Skipping...")
+        return None  # Return None to indicate no processing for blacklisted networks
 
     # Construct the path to the chain.json file based on network type
     if network_type == "mainnet":
