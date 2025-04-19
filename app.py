@@ -14,12 +14,24 @@ import os
 import json
 import subprocess
 import semantic_version
-from loguru import logger
+import structlog
+import logging
 
 app = Flask(__name__)
 
-# Logging configuration
-logger.add("app.log", rotation="10 MB", retention="10 days", level="DEBUG")
+# Configure structlog for colorized and structured logging
+structlog.configure(
+    processors=[
+        structlog.processors.TimeStamper(fmt="iso"),
+        structlog.dev.ConsoleRenderer(colors=True),
+    ],
+    context_class=dict,
+    logger_factory=structlog.stdlib.LoggerFactory(),
+    wrapper_class=structlog.make_filtering_bound_logger(logging.DEBUG),
+    cache_logger_on_first_use=True,
+)
+
+logger = structlog.get_logger()
 
 # Suppress only the single InsecureRequestWarning from urllib3
 requests.packages.urllib3.disable_warnings(
@@ -62,8 +74,8 @@ def get_chain_watch_env_var():
 
     if len(chain_watch) > 0:
         logger.info(
-            "CHAIN_WATCH env variable set, gathering data and watching for these chains: "
-            + chain_watch
+            "CHAIN_WATCH env variable set, gathering data and watching for these chains",
+            chains=chain_watch,
         )
     else:
         logger.info("CHAIN_WATCH env variable not set, gathering data for all chains")
@@ -85,7 +97,7 @@ def fetch_repo():
         else:
             subprocess.run(["git", "clone", repo_clone_url, repo_dir], check=True)
     except subprocess.CalledProcessError as e:
-        logger.error(f"Failed to fetch the repository: {e}")
+        logger.error("Failed to fetch the repository", error=str(e))
         raise Exception(f"Failed to fetch the repository: {e}")
     return repo_dir
 
@@ -175,7 +187,7 @@ def get_block_time_rpc(rpc_url, height, allow_retry=False):
     # RPC endpoints can return a 200 but not JSON (usually an HTML error page due to throttling or some other error)
     # Catch everything instead of just requests.RequestException
     except Exception as e:
-        logger.error(e)
+        logger.error("Error fetching block time", error=str(e))
         # Attempt to retry the request if the error message indicates that the block height is too low
         # Pulls the block height from the error message and adds 20 to it
         if allow_retry and response is not None and response.status_code == 500 and response.content:
@@ -193,7 +205,7 @@ def get_block_time_rpc(rpc_url, height, allow_retry=False):
 
                     return data.get("block", {}).get("header", {}).get("time", "")
             except Exception as ee:
-                logger.error("Retry error:", ee)
+                logger.error("Retry error", error=str(ee))
 
         return None
 
@@ -247,13 +259,14 @@ def fetch_endpoints(network, base_url):
     """Fetch the REST and RPC endpoints for a given network."""
     try:
         response = requests.get(f"{base_url}/{network}/chain.json")
-        logger.info(f"{base_url}/{network}/chain.json")
+        logger.info("Fetching endpoints", url=f"{base_url}/{network}/chain.json")
         response.raise_for_status()
         data = response.json()
         rest_endpoints = data.get("apis", {}).get("rest", [])
         rpc_endpoints = data.get("apis", {}).get("rpc", [])
         return rest_endpoints, rpc_endpoints
-    except requests.RequestException:
+    except requests.RequestException as e:
+        logger.error("Error fetching endpoints", error=str(e))
         return [], []
 
 def fetch_active_upgrade_proposals(rest_url, network, network_repo_url):
@@ -300,11 +313,13 @@ def fetch_active_upgrade_proposals(rest_url, network, network_repo_url):
                     return plan_name, version, height
         return None, None, None
     except requests.RequestException as e:
-        logger.error(f"Error received from server {rest_url}: {e}")
+        logger.error("Error received from server", server=rest_url, error=str(e))
         raise e
     except Exception as e:
         logger.error(
-            f"Unhandled error while requesting active upgrade endpoint from {rest_url}: {e}"
+            "Unhandled error while requesting active upgrade endpoint",
+            server=rest_url,
+            error=str(e),
         )
         raise e
 
@@ -338,11 +353,13 @@ def fetch_current_upgrade_plan(rest_url, network, network_repo_url):
 
         return None, None, None, None
     except requests.RequestException as e:
-        logger.error(f"Error received from server {rest_url}: {e}")
+        logger.error("Error received from server", server=rest_url, error=str(e))
         raise e
     except Exception as e:
         logger.error(
-            f"Unhandled error while requesting current upgrade endpoint from {rest_url}: {e}"
+            "Unhandled error while requesting current upgrade endpoint",
+            server=rest_url,
+            error=str(e),
         )
         raise e
 
@@ -362,7 +379,7 @@ def fetch_network_repo_tags(network, network_repo):
                 tags_url = response.links.get("next", {}).get("url")
             return [tag["name"] for tag in tags]
         except Exception as e:
-            logger.error(f"Error fetching tags for {network}: {e}")
+            logger.error("Error fetching tags", network=network, error=str(e))
             return []
     return []
 
@@ -435,8 +452,7 @@ def find_best_semver_for_versions(network, network_version_strings, network_repo
             semver = possible_semvers[0]
             return f"v{semver.major}.{semver.minor}.{semver.patch}"
     except Exception as e:
-        logger.error(f"Failed to parse version strings into semvers for network {network}")
-        logger.error(e)
+        logger.error("Failed to parse version strings into semvers", network=network, error=str(e))
         return max(network_version_strings, key=len)
 
     return max(network_version_strings, key=len)
@@ -446,7 +462,7 @@ def fetch_data_for_networks_wrapper(network, network_type, repo_path):
     try:
         return fetch_data_for_network(network, network_type, repo_path)
     except Exception as e:
-        logger.error(f"Error fetching data for network {network}: {e}")
+        logger.error("Error fetching data for network", network=network, error=str(e))
         raise e
 
 def is_explorer_healthy(url):
@@ -510,7 +526,7 @@ def fetch_data_for_network(network, network_type, repo_path):
 
     # Check if the chain.json file exists
     if not os.path.exists(chain_json_path):
-        logger.info(f"chain.json not found for network {network}. Skipping...")
+        logger.info("chain.json not found for network. Skipping...", network=network)
         err_output_data[
             "error"
         ] = f"insufficient data in Cosmos chain registry, chain.json not found for {network}. Consider a PR to cosmos/chain-registry"
@@ -538,7 +554,9 @@ def fetch_data_for_network(network, network_type, repo_path):
 
     if len(healthy_rpc_endpoints) == 0:
         logger.info(
-            f"No healthy RPC endpoints found for network {network} while searching through {len(rpc_endpoints)} endpoints. Skipping..."
+            "No healthy RPC endpoints found for network while searching through endpoints. Skipping...",
+            network=network,
+            rpc_endpoints=len(rpc_endpoints),
         )
         err_output_data[
             "error"
@@ -552,7 +570,7 @@ def fetch_data_for_network(network, network_type, repo_path):
     rpc_server_used = ""
     for rpc_endpoint in healthy_rpc_endpoints:
         if not isinstance(rpc_endpoint, dict) or "address" not in rpc_endpoint:
-            logger.info(f"Invalid rpc endpoint format for network {network}: {rpc_endpoint}")
+            logger.info("Invalid rpc endpoint format for network", network=network, rpc_endpoint=rpc_endpoint)
             continue
 
         latest_block_height = get_latest_block_height_rpc(rpc_endpoint["address"])
@@ -562,7 +580,9 @@ def fetch_data_for_network(network, network_type, repo_path):
 
     if latest_block_height < 0:
         logger.info(
-            f"No RPC endpoints returned latest height for network {network} while searching through {len(rpc_endpoints)} endpoints. Skipping..."
+            "No RPC endpoints returned latest height for network while searching through endpoints. Skipping...",
+            network=network,
+            rpc_endpoints=len(rpc_endpoints),
         )
         err_output_data[
             "error"
@@ -571,7 +591,9 @@ def fetch_data_for_network(network, network_type, repo_path):
 
     if len(healthy_rest_endpoints) == 0:
         logger.info(
-            f"No healthy REST endpoints found for network {network} while searching through {len(rest_endpoints)} endpoints. Skipping..."
+            "No healthy REST endpoints found for network while searching through endpoints. Skipping...",
+            network=network,
+            rest_endpoints=len(rest_endpoints),
         )
         err_output_data[
             "error"
@@ -581,7 +603,10 @@ def fetch_data_for_network(network, network_type, repo_path):
         return err_output_data
 
     logger.info(
-        f"Found {len(healthy_rest_endpoints)} rest endpoints and {len(healthy_rpc_endpoints)} rpc endpoints for {network}"
+        "Found rest endpoints and rpc endpoints for network",
+        network=network,
+        rest_endpoints=len(healthy_rest_endpoints),
+        rpc_endpoints=len(healthy_rpc_endpoints),
     )
 
     # Check for active upgrade proposals
@@ -594,7 +619,7 @@ def fetch_data_for_network(network, network_type, repo_path):
     for index, rest_endpoint in enumerate(healthy_rest_endpoints):
         # Validate rest_endpoint format
         if not isinstance(rest_endpoint, dict) or "address" not in rest_endpoint:
-            logger.info(f"Invalid rest endpoint format for network {network}: {rest_endpoint}")
+            logger.info("Invalid rest endpoint format for network", network=network, rest_endpoint=rest_endpoint)
             continue
 
         current_endpoint = rest_endpoint["address"]
@@ -640,18 +665,21 @@ def fetch_data_for_network(network, network_type, repo_path):
         if active_upgrade_check_failed and upgrade_plan_check_failed:
             if index + 1 < len(healthy_rest_endpoints):
                 logger.info(
-                    f"Failed to query rest endpoints {current_endpoint}, trying next rest endpoint"
+                    "Failed to query rest endpoints, trying next rest endpoint",
+                    current_endpoint=current_endpoint,
                 )
                 continue
             else:
                 logger.info(
-                    f"Failed to query rest endpoints {current_endpoint}, all out of endpoints to try"
+                    "Failed to query rest endpoints, all out of endpoints to try",
+                    current_endpoint=current_endpoint,
                 )
                 break
 
         if active_upgrade_check_failed and network not in NETWORKS_NO_GOV_MODULE:
             logger.info(
-                f"Failed to query active upgrade endpoint {current_endpoint}, trying next rest endpoint"
+                "Failed to query active upgrade endpoint, trying next rest endpoint",
+                current_endpoint=current_endpoint,
             )
             continue
 
@@ -686,7 +714,7 @@ def fetch_data_for_network(network, network_type, repo_path):
                 info = json.loads(upgrade_plan.get("info", "{}"))
                 binaries = info.get("binaries", {})
             except:
-                logger.info(f"Failed to parse binaries for network {network}. Non-fatal error, skipping...")
+                logger.info("Failed to parse binaries for network. Non-fatal error, skipping...", network=network)
                 pass
 
             plan_height = upgrade_plan.get("height", -1)
@@ -714,7 +742,7 @@ def fetch_data_for_network(network, network_type, repo_path):
     avg_block_time_seconds = None
     for rpc_endpoint in healthy_rpc_endpoints:
         if not isinstance(rpc_endpoint, dict) or "address" not in rpc_endpoint:
-            logger.info(f"Invalid rpc endpoint format for network {network}: {rpc_endpoint}")
+            logger.info("Invalid rpc endpoint format for network", network=network, rpc_endpoint=rpc_endpoint)
             continue
 
         current_endpoint = rpc_endpoint["address"]
@@ -725,7 +753,8 @@ def fetch_data_for_network(network, network_type, repo_path):
             break
         else:
             logger.info(
-                f"Failed to query current and past block time for rpc endpoint {current_endpoint}, trying next rpc endpoint"
+                "Failed to query current and past block time for rpc endpoint, trying next rpc endpoint",
+                current_endpoint=current_endpoint,
             )
             continue
 
@@ -765,7 +794,7 @@ def fetch_data_for_network(network, network_type, repo_path):
         "logo_urls": logo_urls,
         "explorer_url": explorer_url,
     }
-    logger.info(f"Completed fetch data for network {network}")
+    logger.info("Completed fetch data for network", network=network)
     return output_data
 
 
@@ -780,10 +809,10 @@ def update_data():
         # Git clone or fetch & pull
         try:
             repo_path = fetch_repo()
-            logger.info(f"Repo path: {repo_path}")
+            logger.info("Repo path fetched", path=repo_path)
         except Exception as e:
-            logger.error(f"Error downloading and extracting repo: {e}")
-            logger.info("Error encountered. Sleeping for 5 seconds before retrying...")
+            logger.error("Error downloading and extracting repo", error=str(e))
+            logger.info("Sleeping for 5 seconds before retrying...")
             sleep(5)
             continue
 
@@ -845,15 +874,16 @@ def update_data():
                 datetime.now() - start_time
             ).total_seconds()  # Calculate the elapsed time
             logger.info(
-                f"Data update cycle completed in {elapsed_time} seconds. Sleeping for 1 minute..."
+                "Data update cycle completed. Sleeping for 1 minute...",
+                elapsed_time=elapsed_time,
             )
             sleep(60)
         except Exception as e:
             elapsed_time = (
                 datetime.now() - start_time
             ).total_seconds()  # Calculate the elapsed time in case of an error
-            logger.exception(f"Error in update_data loop after {elapsed_time} seconds: {e}")
-            logger.info("Error encountered. Sleeping for 1 minute before retrying...")
+            logger.exception("Error in update_data loop", elapsed_time=elapsed_time, error=str(e))
+            logger.info("Sleeping for 1 minute before retrying...")
             sleep(60)
 
 
