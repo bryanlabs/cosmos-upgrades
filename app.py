@@ -784,7 +784,7 @@ def fetch_data_for_network(network, network_type, repo_path):
     if upgrade_block_height is not None:
         estimated_upgrade_time = estimate_upgrade_time(current_block_time, past_block_time, latest_block_height, upgrade_block_height)
     else:
-        network_logger.warning(f"Upgrade block height is None for {network}. Skipping upgrade time estimation.")
+        network_logger.debug(f"Upgrade block height is None for {network}. Skipping upgrade time estimation.")
 
     output_data = {
         "network": network,
