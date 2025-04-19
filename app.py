@@ -10,11 +10,33 @@ from flask import Flask, jsonify, request, Response
 from flask_caching import Cache
 from concurrent.futures import ThreadPoolExecutor
 from time import sleep
+import time  # for caching timestamps
 from collections import OrderedDict
 import os
 import json
 import subprocess
 import semantic_version
+
+# Initialize global variables for repo fetch frequency
+repo_path = None
+last_fetch_time = None  # timestamp of last repo fetch
+
+# Initialize single HTTP session for connection pooling
+session = requests.Session()
+session.verify = False
+# Monkey-patch requests to use pooled session
+requests.get = session.get
+requests.post = session.post
+
+# Git fetch interval to reduce frequency of repo updates (default 5 minutes)
+GIT_FETCH_INTERVAL = int(os.environ.get("GIT_FETCH_INTERVAL", 300))
+
+# Cache TTL for endpoint health checks (default 10 minutes)
+CACHE_TTL = int(os.environ.get("ENDPOINT_CACHE_TTL", 600))
+
+# Caches for healthy RPC and REST endpoints: key = tuple of addresses, value = (timestamp, results)
+healthy_rpc_cache = {}
+healthy_rest_cache = {}
 
 app = Flask(__name__)
 
@@ -562,7 +584,7 @@ def fetch_data_for_network(network, network_type, repo_path):
     source = ""
     rest_server_used = ""
 
-    for index, rest_endpoint in healthy_rest_endpoints:
+    for rest_endpoint in healthy_rest_endpoints:  # Fixing unpacking issue
         if isinstance(rest_endpoint, dict):
             current_endpoint = rest_endpoint.get("address", None)
 
@@ -586,7 +608,6 @@ def fetch_data_for_network(network, network_type, repo_path):
                     active_upgrade_version,
                     active_upgrade_height,
                 ) = (None, None, None)
-                active_upgrade_check_failed = True
 
             try:
                 (
@@ -605,7 +626,7 @@ def fetch_data_for_network(network, network_type, repo_path):
                 upgrade_plan_check_failed = True
 
             if active_upgrade_check_failed and upgrade_plan_check_failed:
-                if index + 1 < len(healthy_rest_endpoints):
+                if healthy_rest_endpoints.index(rest_endpoint) + 1 < len(healthy_rest_endpoints):
                     print(
                         f"Failed to query rest endpoints {current_endpoint}, trying next rest endpoint"
                     )
@@ -731,6 +752,7 @@ def fetch_data_for_network(network, network_type, repo_path):
         output_data["upgrade_plan"] = None
         output_data["version"] = None
 
+    # Include logo_URIs and explorers in the output data
     output_data = {
         "network": network,
         "type": network_type,
@@ -745,7 +767,7 @@ def fetch_data_for_network(network, network_type, repo_path):
         "estimated_upgrade_time": estimated_upgrade_time,
         "version": upgrade_version,
         "logo_URIs": data.get("logo_URIs", "no logo"),
-        "explorers": explorers
+        "explorers": explorers,
     }
     print(f"Completed fetch data for network {network}")
     return output_data
