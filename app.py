@@ -64,6 +64,7 @@ SERVER_BLACKLIST = [
     "https://stride.api.bccnodes.com:443",
     "https://api.omniflix.nodestake.top",
     "https://cosmos-lcd.quickapi.com:443",
+    "https://osmosis.rpc.stakin-nodes.com:443",
 ]
 
 NETWORKS_NO_GOV_MODULE = [
@@ -282,9 +283,20 @@ def fetch_endpoints(network, base_url):
     except requests.RequestException as e:
         logger.error("Error fetching endpoints", error=str(e))
         return [], []
-
+    
 def fetch_active_upgrade_proposals(rest_url, network, network_repo_url):
     network_logger = logger.bind(network=network.upper())  # Bind the network name to the logger
+    try:
+        [plan_name, version, height] = fetch_active_upgrade_proposals_v1(rest_url, network, network_repo_url)
+    except RequiresGovV1Exception as e:
+        [plan_name, version, height] = fetch_active_upgrade_proposals_v1(rest_url, network, network_repo_url)
+    except Exception as e:
+        raise e
+    
+    return plan_name, version, height
+
+
+def fetch_active_upgrade_proposals_v1beta1(rest_url, network, network_repo_url):
     try:
         response = requests.get(
             f"{rest_url}/cosmos/gov/v1beta1/proposals?proposal_status=2", verify=False
@@ -293,6 +305,16 @@ def fetch_active_upgrade_proposals(rest_url, network, network_repo_url):
         # Handle 501 Server Error
         if response.status_code == 501:
             return None, None
+
+        # check if the endpoint requires v1 instead of v1beta1
+        if response.status_code != 200:
+            response_json = {}
+            try:
+                response_json = response.json()
+            except:
+                pass
+            if "message" in response_json and "can't convert" in response_json["message"]:
+                raise RequiresGovV1Exception("gov v1 is required")
 
         response.raise_for_status()
         data = response.json()
@@ -333,6 +355,62 @@ def fetch_active_upgrade_proposals(rest_url, network, network_repo_url):
             server=rest_url,
             error=str(e),
         )
+        raise e
+    except RequiresGovV1Exception as e:
+        raise e
+    except Exception as e:
+        print(
+            f"Unhandled error while requesting active upgrade endpoint from {rest_url}: {e}"
+        )
+        raise e
+    
+def fetch_active_upgrade_proposals_v1(rest_url, network, network_repo_url):
+    try:
+        response = requests.get(
+            f"{rest_url}/cosmos/gov/v1/proposals?proposal_status=2", verify=False
+        )
+
+        # Handle 501 Server Error
+        if response.status_code == 501:
+            return None, None
+
+        response.raise_for_status()
+        data = response.json()
+
+        for proposal in data.get("proposals", []):
+            messages = proposal.get("messages", [])
+
+            for message in messages:
+                proposal_type = message.get("@type")
+                if (
+                    proposal_type
+                    == "/cosmos.upgrade.v1beta1.SoftwareUpgradeProposal" or
+                    proposal_type
+                    == '/cosmos.upgrade.v1beta1.MsgSoftwareUpgrade'
+                ):
+                    # Extract version from the plan name
+                    plan = message.get("plan", {})
+                    plan_name = plan.get("name", "")
+
+                    # naive regex search on whole message dump
+                    content_dump = json.dumps(message)
+
+                    # we tried plan_name regex match only, but the plan_name does not always track the version string
+                    # see Terra v5 upgrade which points to the v2.2.1 version tag
+                    versions = SEMANTIC_VERSION_PATTERN.findall(content_dump)
+                    if versions:
+                        network_repo_semver_tags = get_network_repo_semver_tags(network, network_repo_url)
+                        version = find_best_semver_for_versions(network, versions, network_repo_semver_tags)
+                    try:
+                        height = int(plan.get("height", 0))
+                    except ValueError:
+                        height = 0
+
+                    if version:
+                        return plan_name, version, height
+        return None, None, None
+    except requests.RequestException as e:
+        print(f"Error received from server {rest_url}: {e}")
         raise e
     except Exception as e:
         network_logger.error(
@@ -664,7 +742,7 @@ def fetch_data_for_network(network, network_type, repo_path):
                 active_upgrade_height,
             ) = fetch_active_upgrade_proposals(current_endpoint, network, network_repo_url)
 
-        except:
+        except Exception as e:
             (
                 active_upgrade_name,
                 active_upgrade_version,
