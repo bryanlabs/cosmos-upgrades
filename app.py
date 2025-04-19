@@ -17,6 +17,13 @@ import semantic_version
 import logging
 import sys
 from loguru import logger
+from dotenv import load_dotenv  # Import dotenv to load .env files
+
+# Load environment variables from .env file
+load_dotenv()
+
+# Load network blacklist from environment variable
+NETWORK_BLACKLIST = os.environ.get("NETWORK_BLACKLIST", "").split(",")
 
 app = Flask(__name__)
 
@@ -522,6 +529,16 @@ def fetch_explorer_urls(data):
 def fetch_data_for_network(network, network_type, repo_path):
     """Fetch data for a given network."""
     network_logger = logger.bind(network=network.upper())  # Bind the network name to the logger
+
+    # Skip networks in the blacklist
+    if network.upper() in NETWORK_BLACKLIST:
+        network_logger.info("Network is in the blacklist. Skipping...")
+        return {
+            "network": network,
+            "type": network_type,
+            "error": "Network is blacklisted",
+            "upgrade_found": False,
+        }
 
     # Construct the path to the chain.json file based on network type
     if network_type == "mainnet":
