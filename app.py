@@ -487,6 +487,10 @@ def fetch_explorer_urls(data):
     """Fetch and filter explorer URLs from the chain registry data."""
     explorers = data.get("explorers", [])
     healthy_explorer = get_healthy_explorer(explorers)
+    if healthy_explorer:
+        # Remove tx_page and account_page if they exist
+        healthy_explorer.pop("tx_page", None)
+        healthy_explorer.pop("account_page", None)
     return healthy_explorer
 
 def fetch_data_for_network(network, network_type, repo_path):
