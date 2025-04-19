@@ -184,41 +184,45 @@ def get_latest_block_height_rpc(rpc_url):
         return -1  # Return -1 to indicate an error
 
 
-def get_block_time_rpc(rpc_url, height, allow_retry=False, network=None):
+def get_block_time_rpc(rpc_url, height, retries=3, network=None):
     """Fetch the block header time for a given block height from the RPC endpoint."""
-    network_logger = logger.bind(network=network.upper() if network else "UNKNOWN")  # Bind the network name to the logger
-    response = None
-    try:
-        response = requests.get(f"{rpc_url}/block?height={height}", timeout=2)
-        response.raise_for_status()
-        data = response.json()
+    network_logger = logger.bind(network=network.upper() if network else "UNKNOWN")
+    for attempt in range(retries):
+        try:
+            response = requests.get(f"{rpc_url}/block?height={height}", timeout=2)
+            response.raise_for_status()
+            data = response.json()
+            if "result" in data.keys():
+                data = data["result"]
+            return data.get("block", {}).get("header", {}).get("time", "")
+        except requests.exceptions.HTTPError as e:
+            network_logger.error(f"HTTP error on attempt {attempt + 1}: {str(e)}")
+            if attempt == retries - 1:
+                return None  # Return None if all retries fail
+        except Exception as e:
+            network_logger.error(f"Attempt {attempt + 1} failed: {str(e)}")
+            if attempt == retries - 1:
+                return None  # Return None if all retries fail
+        sleep(2 ** attempt)  # Exponential backoff
 
-        if "result" in data.keys():
-             data = data["result"]
+def estimate_upgrade_time(latest_block_time, past_block_time, latest_block_height, upgrade_block_height):
+    """Estimate the upgrade time based on block times and heights."""
+    if not latest_block_time or not past_block_time or upgrade_block_height is None:
+        return None  # Return None if any required value is missing
 
-        return data.get("block", {}).get("header", {}).get("time", "")
-    except Exception as e:
-        network_logger.error("Error fetching block time", error=str(e))
-        # Attempt to retry the request if the error message indicates that the block height is too low
-        if allow_retry and response is not None and response.status_code == 500 and response.content:
-            try:
-                error_message = json.loads(response.content)
-                if "lowest height is " in error_message.get("error", {}).get("data", ""):
-                    network_logger.info("Reattempting block height request with lowest height data from previous response")
-                    height = int(error_message.get("error", {}).get("data", "").split("lowest height is ")[1].strip()) + 20
-                    response = requests.get(f"{rpc_url}/block?height={height}", timeout=1)
-                    response.raise_for_status()
-                    data = response.json()
+    # Parse block times as UTC
+    latest_block_datetime = parse_isoformat_string(latest_block_time)
+    past_block_datetime = parse_isoformat_string(past_block_time)
 
-                    if "result" in data.keys():
-                        data = data["result"]
+    # Calculate average block time
+    avg_block_time_seconds = (latest_block_datetime - past_block_datetime).total_seconds() / 10000
 
-                    return data.get("block", {}).get("header", {}).get("time", "")
-            except Exception as ee:
-                network_logger.error("Retry error", error=str(ee))
+    # Estimate upgrade time
+    blocks_until_upgrade = upgrade_block_height - latest_block_height
+    estimated_seconds_until_upgrade = avg_block_time_seconds * blocks_until_upgrade
+    estimated_upgrade_datetime = datetime.utcnow() + timedelta(seconds=estimated_seconds_until_upgrade)
 
-        return None
-
+    return estimated_upgrade_datetime.isoformat().replace("+00:00", "Z")
 
 def parse_isoformat_string(date_string):
     date_string = re.sub(r"(\.\d{6})\d+Z", r"\1Z", date_string)
@@ -754,7 +758,6 @@ def fetch_data_for_network(network, network_type, repo_path):
 
     current_block_time = None
     past_block_time = None
-    avg_block_time_seconds = None
     for rpc_endpoint in healthy_rpc_endpoints:
         if not isinstance(rpc_endpoint, dict) or "address" not in rpc_endpoint:
             network_logger.info("Invalid rpc endpoint format for network", rpc_endpoint=rpc_endpoint)
@@ -762,7 +765,7 @@ def fetch_data_for_network(network, network_type, repo_path):
 
         current_endpoint = rpc_endpoint["address"]
         current_block_time = get_block_time_rpc(current_endpoint, latest_block_height, network=network)
-        past_block_time = get_block_time_rpc(current_endpoint, latest_block_height - 10000, allow_retry=True, network=network)
+        past_block_time = get_block_time_rpc(current_endpoint, latest_block_height - 10000, network=network)
 
         if current_block_time and past_block_time:
             break
@@ -773,25 +776,15 @@ def fetch_data_for_network(network, network_type, repo_path):
             )
             continue
 
-    if current_block_time and past_block_time:
-        current_block_datetime = parse_isoformat_string(current_block_time)
-        past_block_datetime = parse_isoformat_string(past_block_time)
-        avg_block_time_seconds = (
-            current_block_datetime - past_block_datetime
-        ).total_seconds() / 10000
+    if not current_block_time or not past_block_time:
+        network_logger.error("Failed to fetch block times. Skipping network.")
+        return None  # Skip this network if block times cannot be fetched
 
-    # Estimate the upgrade time
     estimated_upgrade_time = None
-    if upgrade_block_height and avg_block_time_seconds:
-        estimated_seconds_until_upgrade = avg_block_time_seconds * (
-            upgrade_block_height - latest_block_height
-        )
-        estimated_upgrade_datetime = datetime.utcnow() + timedelta(
-            seconds=estimated_seconds_until_upgrade
-        )
-        estimated_upgrade_time = estimated_upgrade_datetime.isoformat().replace(
-            "+00:00", "Z"
-        )
+    if upgrade_block_height is not None:
+        estimated_upgrade_time = estimate_upgrade_time(current_block_time, past_block_time, latest_block_height, upgrade_block_height)
+    else:
+        network_logger.warning(f"Upgrade block height is None for {network}. Skipping upgrade time estimation.")
 
     output_data = {
         "network": network,
