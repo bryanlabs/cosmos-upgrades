@@ -524,10 +524,12 @@ def fetch_data_for_network(network, network_type, repo_path):
 
     rpc_server_used = ""
     for rpc_endpoint in healthy_rpc_endpoints:
-        latest_block_height = get_latest_block_height_rpc(rpc_endpoint["address"])
-        if latest_block_height > 0:
-            rpc_server_used = rpc_endpoint["address"]
-            break
+        if isinstance(rpc_endpoint, dict):
+            current_endpoint = rpc_endpoint.get("address", None)
+            latest_block_height = get_latest_block_height_rpc(current_endpoint)
+            if latest_block_height > 0:
+                rpc_server_used = current_endpoint
+                break
 
     if latest_block_height < 0:
         print(
@@ -560,135 +562,136 @@ def fetch_data_for_network(network, network_type, repo_path):
     source = ""
     rest_server_used = ""
 
-    for index, rest_endpoint in enumerate(healthy_rest_endpoints):
-        current_endpoint = rest_endpoint["address"]
+    for index, rest_endpoint in healthy_rest_endpoints:
+        if isinstance(rest_endpoint, dict):
+            current_endpoint = rest_endpoint.get("address", None)
 
-        if current_endpoint in SERVER_BLACKLIST:
-            continue
+            if current_endpoint in SERVER_BLACKLIST:
+                continue
 
-        active_upgrade_check_failed = False
-        upgrade_plan_check_failed = False
-        try:
-            if network in NETWORKS_NO_GOV_MODULE:
-                raise Exception("Network does not have gov module")
-            (
-                active_upgrade_name,
-                active_upgrade_version,
-                active_upgrade_height,
-            ) = fetch_active_upgrade_proposals(current_endpoint, network, network_repo_url)
+            active_upgrade_check_failed = False
+            upgrade_plan_check_failed = False
+            try:
+                if network in NETWORKS_NO_GOV_MODULE:
+                    raise Exception("Network does not have gov module")
+                (
+                    active_upgrade_name,
+                    active_upgrade_version,
+                    active_upgrade_height,
+                ) = fetch_active_upgrade_proposals(current_endpoint, network, network_repo_url)
 
-        except:
-            (
-                active_upgrade_name,
-                active_upgrade_version,
-                active_upgrade_height,
-            ) = (None, None, None)
-            active_upgrade_check_failed = True
+            except:
+                (
+                    active_upgrade_name,
+                    active_upgrade_version,
+                    active_upgrade_height,
+                ) = (None, None, None)
+                active_upgrade_check_failed = True
 
-        try:
-            (
-                current_upgrade_name,
-                current_upgrade_version,
-                current_upgrade_height,
-                current_plan_dump,
-            ) = fetch_current_upgrade_plan(current_endpoint, network, network_repo_url)
-        except:
-            (
-                current_upgrade_name,
-                current_upgrade_version,
-                current_upgrade_height,
-                current_plan_dump,
-            ) = (None, None, None, None)
-            upgrade_plan_check_failed = True
+            try:
+                (
+                    current_upgrade_name,
+                    current_upgrade_version,
+                    current_upgrade_height,
+                    current_plan_dump,
+                ) = fetch_current_upgrade_plan(current_endpoint, network, network_repo_url)
+            except:
+                (
+                    current_upgrade_name,
+                    current_upgrade_version,
+                    current_upgrade_height,
+                    current_plan_dump,
+                ) = (None, None, None, None)
+                upgrade_plan_check_failed = True
 
-        if active_upgrade_check_failed and upgrade_plan_check_failed:
-            if index + 1 < len(healthy_rest_endpoints):
+            if active_upgrade_check_failed and upgrade_plan_check_failed:
+                if index + 1 < len(healthy_rest_endpoints):
+                    print(
+                        f"Failed to query rest endpoints {current_endpoint}, trying next rest endpoint"
+                    )
+                    continue
+                else:
+                    print(
+                        f"Failed to query rest endpoints {current_endpoint}, all out of endpoints to try"
+                    )
+                    break
+
+            if active_upgrade_check_failed and network not in NETWORKS_NO_GOV_MODULE:
                 print(
-                    f"Failed to query rest endpoints {current_endpoint}, trying next rest endpoint"
+                    f"Failed to query active upgrade endpoint {current_endpoint}, trying next rest endpoint"
                 )
                 continue
-            else:
-                print(
-                    f"Failed to query rest endpoints {current_endpoint}, all out of endpoints to try"
-                )
+
+            if (
+                active_upgrade_version
+                and (active_upgrade_height is not None)
+                and active_upgrade_height > latest_block_height
+            ):
+                upgrade_block_height = active_upgrade_height
+                upgrade_version = active_upgrade_version
+                upgrade_name = active_upgrade_name
+                source = "active_upgrade_proposals"
+                rest_server_used = current_endpoint
                 break
 
-        if active_upgrade_check_failed and network not in NETWORKS_NO_GOV_MODULE:
-            print(
-                f"Failed to query active upgrade endpoint {current_endpoint}, trying next rest endpoint"
-            )
-            continue
+            if (
+                current_upgrade_version
+                and (current_upgrade_height is not None)
+                and (current_plan_dump is not None)
+                and current_upgrade_height > latest_block_height
+            ):
+                upgrade_block_height = current_upgrade_height
+                upgrade_plan = json.loads(current_plan_dump)
+                upgrade_version = current_upgrade_version
+                upgrade_name = current_upgrade_name
+                source = "current_upgrade_plan"
+                rest_server_used = current_endpoint
+                # Extract the relevant information from the parsed JSON
+                info = {}
+                binaries = []
+                try:
+                    info = json.loads(upgrade_plan.get("info", "{}"))
+                    binaries = info.get("binaries", {})
+                except:
+                    print(f"Failed to parse binaries for network {network}. Non-fatal error, skipping...")
+                    pass
 
-        if (
-            active_upgrade_version
-            and (active_upgrade_height is not None)
-            and active_upgrade_height > latest_block_height
-        ):
-            upgrade_block_height = active_upgrade_height
-            upgrade_version = active_upgrade_version
-            upgrade_name = active_upgrade_name
-            source = "active_upgrade_proposals"
-            rest_server_used = current_endpoint
-            break
+                plan_height = upgrade_plan.get("height", -1)
+                try:
+                    plan_height = int(plan_height)
+                except ValueError:
+                    plan_height = -1
 
-        if (
-            current_upgrade_version
-            and (current_upgrade_height is not None)
-            and (current_plan_dump is not None)
-            and current_upgrade_height > latest_block_height
-        ):
-            upgrade_block_height = current_upgrade_height
-            upgrade_plan = json.loads(current_plan_dump)
-            upgrade_version = current_upgrade_version
-            upgrade_name = current_upgrade_name
-            source = "current_upgrade_plan"
-            rest_server_used = current_endpoint
-            # Extract the relevant information from the parsed JSON
-            info = {}
-            binaries = []
-            try:
-                info = json.loads(upgrade_plan.get("info", "{}"))
-                binaries = info.get("binaries", {})
-            except:
-                print(f"Failed to parse binaries for network {network}. Non-fatal error, skipping...")
-                pass
+                # Include the expanded information in the output data
+                output_data["upgrade_plan"] = {
+                    "height": plan_height,
+                    "binaries": binaries,
+                    "name": upgrade_plan.get("name", None),
+                    "upgraded_client_state": upgrade_plan.get("upgraded_client_state", None),
+                }
+                break
 
-            plan_height = upgrade_plan.get("height", -1)
-            try:
-                plan_height = int(plan_height)
-            except ValueError:
-                plan_height = -1
-
-            # Include the expanded information in the output data
-            output_data["upgrade_plan"] = {
-                "height": plan_height,
-                "binaries": binaries,
-                "name": upgrade_plan.get("name", None),
-                "upgraded_client_state": upgrade_plan.get("upgraded_client_state", None),
-            }
-            break
-
-        if not active_upgrade_version and not current_upgrade_version:
-            # this is where the "no upgrades found block runs"
-            rest_server_used = current_endpoint
-            break
+            if not active_upgrade_version and not current_upgrade_version:
+                # this is where the "no upgrades found block runs"
+                rest_server_used = current_endpoint
+                break
 
     current_block_time = None
     past_block_time = None
     avg_block_time_seconds = None
     for rpc_endpoint in healthy_rpc_endpoints:
-        # Get average block time
-        current_endpoint = rpc_endpoint["address"]
-        current_block_time = get_block_time_rpc(current_endpoint, latest_block_height)
-        past_block_time = get_block_time_rpc(current_endpoint, latest_block_height - 10000, allow_retry=True)
+        if isinstance(rpc_endpoint, dict):
+            current_endpoint = rpc_endpoint.get("address", None)
+            current_block_time = get_block_time_rpc(current_endpoint, latest_block_height)
+            past_block_time = get_block_time_rpc(current_endpoint, latest_block_height - 10000, allow_retry=True)
 
-        if current_block_time and past_block_time:
-            break
-        else:
-            print(
-                f"Failed to query current and past block time for rpc endpoint {current_endpoint}, trying next rpc endpoint"
-            )
-            continue
+            if current_block_time and past_block_time:
+                break
+            else:
+                print(
+                    f"Failed to query current and past block time for rpc endpoint {current_endpoint}, trying next rpc endpoint"
+                )
+                continue
 
     if current_block_time and past_block_time:
         current_block_datetime = parse_isoformat_string(current_block_time)
@@ -710,6 +713,24 @@ def fetch_data_for_network(network, network_type, repo_path):
             "+00:00", "Z"
         )
 
+    # Add logo_URIs to the output data if available, otherwise set to 'no logo'
+    # Reorder explorers to show 'mintscan' first, then 'ping.pub', then the rest
+    explorers = data.get("explorers", [])
+    if explorers != "no explorers":
+        explorers.sort(key=lambda x: (x.get("kind") != "mintscan", x.get("kind") != "ping.pub"))
+    else:
+        explorers = "no explorers"
+
+    # Ensure upgrade_found is null when rpc_server is null
+    if not rpc_server_used:
+        output_data["upgrade_found"] = None
+        output_data["upgrade_name"] = None
+        output_data["source"] = None
+        output_data["upgrade_block_height"] = None
+        output_data["estimated_upgrade_time"] = None
+        output_data["upgrade_plan"] = None
+        output_data["version"] = None
+
     output_data = {
         "network": network,
         "type": network_type,
@@ -723,6 +744,8 @@ def fetch_data_for_network(network, network_type, repo_path):
         "upgrade_plan": output_data.get("upgrade_plan", None),
         "estimated_upgrade_time": estimated_upgrade_time,
         "version": upgrade_version,
+        "logo_URIs": data.get("logo_URIs", "no logo"),
+        "explorers": explorers
     }
     print(f"Completed fetch data for network {network}")
     return output_data
