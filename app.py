@@ -4,18 +4,22 @@ from datetime import datetime
 from datetime import timedelta
 from random import shuffle
 import traceback
-# import logging
+import logging  # Add logging for better traceability
 import threading
 from flask import Flask, jsonify, request, Response
 from flask_caching import Cache
 from concurrent.futures import ThreadPoolExecutor
 from time import sleep
 import time  # for caching timestamps
-from collections import OrderedDict
+from collections import OrderedDict, defaultdict  # For dynamic blacklist tracking
 import os
 import json
 import subprocess
 import semantic_version
+import aiohttp
+import asyncio
+import socket  # Add this import for handling socket errors
+from asyncio import TimeoutError  # Import TimeoutError for retries
 
 # Initialize global variables for repo fetch frequency
 repo_path = None
@@ -38,10 +42,13 @@ CACHE_TTL = int(os.environ.get("ENDPOINT_CACHE_TTL", 600))
 healthy_rpc_cache = {}
 healthy_rest_cache = {}
 
+# Cache for endpoint health checks
+endpoint_health_cache = {}
+
 app = Flask(__name__)
 
 # Logging configuration
-# logging.basicConfig(filename='app.log', level=print, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
 # Suppress only the single InsecureRequestWarning from urllib3
 requests.packages.urllib3.disable_warnings(
@@ -79,6 +86,10 @@ TESTNET_DATA = []
 
 SEMANTIC_VERSION_PATTERN = re.compile(r"(v\d+(?:\.\d+){0,2})")
 
+# Dynamic blacklist for problematic endpoints
+dynamic_blacklist = defaultdict(int)
+BLACKLIST_THRESHOLD = 3  # Number of failures before blacklisting
+
 
 # Explicit list of chains to pull data from
 def get_chain_watch_env_var():
@@ -103,8 +114,14 @@ CHAIN_WATCH = get_chain_watch_env_var()
 # Clone the repo
 def fetch_repo():
     """Clone the GitHub repository or update it if it already exists."""
+    global last_fetch_time
     repo_clone_url = "https://github.com/cosmos/chain-registry.git"
     repo_dir = os.path.join(os.getcwd(), "chain-registry")
+
+    # Skip fetching if the last fetch was recent
+    if last_fetch_time and (datetime.now() - last_fetch_time).total_seconds() < GIT_FETCH_INTERVAL:
+        print("Skipping repo fetch; last fetch was recent.")
+        return repo_dir
 
     if os.path.exists(repo_dir):
         old_wd = os.getcwd()
@@ -127,373 +144,125 @@ def fetch_repo():
         except subprocess.CalledProcessError:
             raise Exception("Failed to clone the repository.")
 
+    last_fetch_time = datetime.now()
     return repo_dir
 
 
-def get_healthy_rpc_endpoints(rpc_endpoints):
-    with ThreadPoolExecutor(max_workers=num_workers) as executor:
-        healthy_rpc_endpoints = [
-            rpc
-            for rpc, is_healthy in executor.map(
-                lambda rpc: (rpc, is_rpc_endpoint_healthy(rpc["address"])), rpc_endpoints
-            )
-            if is_healthy
-        ]
+# Reuse a single aiohttp.ClientSession for all asynchronous requests
+class AsyncSessionManager:
+    def __init__(self):
+        self.session = None
 
-    return healthy_rpc_endpoints[:5]  # Select the first 5 healthy RPC endpoints
+    async def get_session(self):
+        if self.session is None or self.session.closed:
+            self.session = aiohttp.ClientSession()
+        return self.session
 
-
-def get_healthy_rest_endpoints(rest_endpoints):
-    with ThreadPoolExecutor(max_workers=num_workers) as executor:
-        healthy_rest_endpoints = [
-            rest
-            for rest, is_healthy in executor.map(
-                lambda rest: (rest, is_rest_endpoint_healthy(rest["address"])),
-                rest_endpoints,
-            )
-            if is_healthy
-        ]
-
-    return healthy_rest_endpoints[:5]  # Select the first 5 healthy REST endpoints
+    async def close_session(self):
+        if self.session and not self.session.closed:
+            await self.session.close()
 
 
-def is_rpc_endpoint_healthy(endpoint):
+async_session_manager = AsyncSessionManager()
+
+
+async def is_rpc_endpoint_healthy_async(endpoint):
+    """Asynchronous check for RPC endpoint health."""
+    if endpoint in SERVER_BLACKLIST or dynamic_blacklist[endpoint] >= BLACKLIST_THRESHOLD:
+        logging.warning(f"Skipping blacklisted RPC endpoint: {endpoint}")
+        return endpoint, False
+
+    if endpoint in endpoint_health_cache:
+        return endpoint, endpoint_health_cache[endpoint]
+
+    session = await async_session_manager.get_session()
     try:
-        response = requests.get(f"{endpoint}/abci_info", timeout=1, verify=False)
-        if response.status_code != 200:
-            response = requests.get(f"{endpoint}/health", timeout=1, verify=False)
-        return response.status_code == 200
-    except:
-        return False
-
-def is_rest_endpoint_healthy(endpoint):
-    try:
-        response = requests.get(f"{endpoint}/health", timeout=1, verify=False)
-        # some chains dont implement the /health endpoint. Should we just skip /health and go directly to the below?
-        if response.status_code != 200:
-            response = requests.get(
-                f"{endpoint}/cosmos/base/tendermint/v1beta1/node_info",
-                timeout=1,
-                verify=False,
-            )
-        return response.status_code == 200
-    except:
-        return False
-
-def get_latest_block_height_rpc(rpc_url):
-    """Fetch the latest block height from the RPC endpoint."""
-    try:
-        response = requests.get(f"{rpc_url}/status", timeout=1)
-        response.raise_for_status()
-        data = response.json()
-
-        if "result" in data.keys():
-             data = data["result"]
-
-        return int(
-            data.get("sync_info", {}).get("latest_block_height", 0)
-        )
-
-    # RPC endpoints can return a 200 but not JSON (usually an HTML error page due to throttling or some other error)
-    # Catch everything instead of just requests.RequestException
-    except Exception:
-        return -1  # Return -1 to indicate an error
-
-
-def get_block_time_rpc(rpc_url, height, allow_retry=False):
-    """Fetch the block header time for a given block height from the RPC endpoint."""
-    response = None
-    try:
-        response = requests.get(f"{rpc_url}/block?height={height}", timeout=2)
-        response.raise_for_status()
-        data = response.json()
-
-        if "result" in data.keys():
-             data = data["result"]
-
-        return data.get("block", {}).get("header", {}).get("time", "")
-    # RPC endpoints can return a 200 but not JSON (usually an HTML error page due to throttling or some other error)
-    # Catch everything instead of just requests.RequestException
-    except Exception as e:
-        print(e)
-        # Attempt to retry the request if the error message indicates that the block height is too low
-        # Pulls the block height from the error message and adds 20 to it
-        if allow_retry and response is not None and response.status_code == 500 and response.content:
-            try:
-                error_message = json.loads(response.content)
-                if "lowest height is " in error_message.get("error", {}).get("data", ""):
-                    print("Reattempting block height request with lowest height data from previous response")
-                    height = int(error_message.get("error", {}).get("data", "").split("lowest height is ")[1].strip()) + 20
-                    response = requests.get(f"{rpc_url}/block?height={height}", timeout=1)
-                    response.raise_for_status()
-                    data = response.json()
-
-                    if "result" in data.keys():
-                        data = data["result"]
-
-                    return data.get("block", {}).get("header", {}).get("time", "")
-            except Exception as ee:
-                print("Retry error:", ee)
-
-        return None
-
-
-def parse_isoformat_string(date_string):
-    date_string = re.sub(r"(\.\d{6})\d+Z", r"\1Z", date_string)
-    # The microseconds MUST be 6 digits long
-    if "." in date_string and len(date_string.split(".")[1]) != 7 and date_string.endswith("Z"):
-        micros = date_string.split(".")[-1][:-1]
-        date_string = date_string.replace(micros, micros.ljust(6, "0"))
-    date_string = date_string.replace("Z", "+00:00")
-    return datetime.fromisoformat(date_string)
-
-
-def reorder_data(data):
-    ordered_data = OrderedDict(
-        [
-            ("type", data.get("type")),
-            ("network", data.get("network")),
-            ("rpc_server", data.get("rpc_server")),
-            ("rest_server", data.get("rest_server")),
-            ("latest_block_height", data.get("latest_block_height")),
-            ("upgrade_found", data.get("upgrade_found")),
-            ("upgrade_name", data.get("upgrade_name")),
-            ("source", data.get("source")),
-            ("upgrade_block_height", data.get("upgrade_block_height")),
-            ("estimated_upgrade_time", data.get("estimated_upgrade_time")),
-            ("upgrade_plan", data.get("upgrade_plan")),
-            ("version", data.get("version")),
-            ("error", data.get("error")),
-        ]
-    )
-    return ordered_data
-
-
-def fetch_all_endpoints(network_type, base_url, request_data):
-    """Fetch all the REST and RPC endpoints for all networks and store in a map."""
-    networks = (
-        request_data.get("MAINNETS", [])
-        if network_type == "mainnet"
-        else request_data.get("TESTNETS", [])
-    )
-    endpoints_map = {}
-    for network in networks:
-        rest_endpoints, rpc_endpoints = fetch_endpoints(network, base_url)
-        endpoints_map[network] = {"rest": rest_endpoints, "rpc": rpc_endpoints}
-    return endpoints_map
-
-
-def fetch_endpoints(network, base_url):
-    """Fetch the REST and RPC endpoints for a given network."""
-    try:
-        response = requests.get(f"{base_url}/{network}/chain.json")
-        print(f"{base_url}/{network}/chain.json")
-        response.raise_for_status()
-        data = response.json()
-        rest_endpoints = data.get("apis", {}).get("rest", [])
-        rpc_endpoints = data.get("apis", {}).get("rpc", [])
-        return rest_endpoints, rpc_endpoints
-    except requests.RequestException:
-        return [], []
-
-def fetch_active_upgrade_proposals(rest_url, network, network_repo_url):
-    try:
-        response = requests.get(
-            f"{rest_url}/cosmos/gov/v1beta1/proposals?proposal_status=2", verify=False
-        )
-
-        # Handle 501 Server Error
-        if response.status_code == 501:
-            return None, None
-
-        response.raise_for_status()
-        data = response.json()
-
-        for proposal in data.get("proposals", []):
-            content = proposal.get("content", {})
-            proposal_type = content.get("@type")
-            if (
-                proposal_type
-                == "/cosmos.upgrade.v1beta1.SoftwareUpgradeProposal" or
-                proposal_type
-                == '/cosmos.upgrade.v1beta1.MsgSoftwareUpgrade'
-            ):
-                # Extract version from the plan name
-                plan = content.get("plan", {})
-                plan_name = plan.get("name", "")
-
-                # naive regex search on whole message dump
-                content_dump = json.dumps(content)
-
-                # we tried plan_name regex match only, but the plan_name does not always track the version string
-                # see Terra v5 upgrade which points to the v2.2.1 version tag
-                versions = SEMANTIC_VERSION_PATTERN.findall(content_dump)
-                if versions:
-                    network_repo_semver_tags = get_network_repo_semver_tags(network, network_repo_url)
-                    version = find_best_semver_for_versions(network, versions, network_repo_semver_tags)
-                try:
-                    height = int(plan.get("height", 0))
-                except ValueError:
-                    height = 0
-
-                if version:
-                    return plan_name, version, height
-        return None, None, None
-    except requests.RequestException as e:
-        print(f"Error received from server {rest_url}: {e}")
-        raise e
-    except Exception as e:
-        print(
-            f"Unhandled error while requesting active upgrade endpoint from {rest_url}: {e}"
-        )
-        raise e
-
-def fetch_current_upgrade_plan(rest_url, network, network_repo_url):
-    try:
-        response = requests.get(
-            f"{rest_url}/cosmos/upgrade/v1beta1/current_plan", verify=False
-        )
-        response.raise_for_status()
-        data = response.json()
-
-        plan = data.get("plan", {})
-        if plan:
-            plan_name = plan.get("name", "")
-
-            # Convert the plan to string and search for the version pattern
-            plan_dump = json.dumps(plan)
-
-            # Get all version matches
-            version_matches = SEMANTIC_VERSION_PATTERN.findall(plan_dump)
-
-            if version_matches:
-                # Find the longest match
-                network_repo_semver_tags = get_network_repo_semver_tags(network, network_repo_url)
-                version = find_best_semver_for_versions(network, version_matches, network_repo_semver_tags)
-                try:
-                    height = int(plan.get("height", 0))
-                except ValueError:
-                    height = 0
-                return plan_name, version, height, plan_dump
-
-        return None, None, None, None
-    except requests.RequestException as e:
-        print(f"Error received from server {rest_url}: {e}")
-        raise e
-    except Exception as e:
-        print(
-            f"Unhandled error while requesting current upgrade endpoint from {rest_url}: {e}"
-        )
-        raise e
-
-def fetch_network_repo_tags(network, network_repo):
-    if "github.com" in network_repo:
-        try:
-            repo_parts = network_repo.split("/")
-            repo_name = repo_parts[-1]
-            repo_owner = repo_parts[-2]
-
-            if not repo_name or not repo_owner:
-                print(f"Could not parse github repo name or owner for {network}")
-                return []
-
-            tags_url = GITHUB_API_URL + f"/repos/{repo_owner}/{repo_name}/tags"
-            tags = requests.get(tags_url)
-            return list(map(lambda tag: tag["name"], tags.json()))
-        except Exception as e:
-            print(f"Could not fetch tags from github for network {network}")
-            print(e)
-            return []
-    else:
-        print(f"Could not fetch tags from github for network {network}: unsupported repo url {network_repo}")
-        return []
-
-def get_network_repo_semver_tags(network, network_repo_url):
-    cached_tags = cache.get(network_repo_url + "_tags")
-    if not cached_tags:
-        network_repo_tag_strings = fetch_network_repo_tags(network, network_repo_url)
-        #cache response from network repo url to reduce api calls to whatever service is hosting the repo
-        cache.set(network_repo_url + "_tags", network_repo_tag_strings, timeout=600)
-    else:
-        network_repo_tag_strings = cached_tags
-
-    network_repo_semver_tags = []
-    for tag in network_repo_tag_strings:
-        #only use semantic version tags
-        try:
-            if tag.startswith("v"):
-                version = semantic_version.Version(tag[1:])
+        async with session.get(f"{endpoint}/abci_info", timeout=1, ssl=False) as response:
+            if response.status != 200:
+                async with session.get(f"{endpoint}/health", timeout=1, ssl=False) as response:
+                    is_healthy = response.status == 200
             else:
-                version = semantic_version.Version(tag)
-            network_repo_semver_tags.append(version)
+                is_healthy = True
+    except (socket.gaierror, TimeoutError) as e:
+        logging.warning(f"Transient error for RPC endpoint {endpoint}: {e}")
+        is_healthy = False
+    except Exception as e:
+        logging.error(f"Error checking RPC endpoint {endpoint}: {e}")
+        is_healthy = False
+
+    if not is_healthy:
+        dynamic_blacklist[endpoint] += 1
+
+    endpoint_health_cache[endpoint] = is_healthy
+    return endpoint, is_healthy
+
+
+async def is_rest_endpoint_healthy_async(endpoint):
+    """Asynchronous check for REST endpoint health."""
+    if endpoint in SERVER_BLACKLIST or dynamic_blacklist[endpoint] >= BLACKLIST_THRESHOLD:
+        logging.warning(f"Skipping blacklisted REST endpoint: {endpoint}")
+        return endpoint, False
+
+    if endpoint in endpoint_health_cache:
+        return endpoint, endpoint_health_cache[endpoint]
+
+    session = await async_session_manager.get_session()
+    try:
+        async with session.get(f"{endpoint}/health", timeout=1, ssl=False) as response:
+            if response.status != 200:
+                async with session.get(
+                    f"{endpoint}/cosmos/base/tendermint/v1beta1/node_info", timeout=1, ssl=False
+                ) as response:
+                    is_healthy = response.status == 200
+            else:
+                is_healthy = True
+    except (socket.gaierror, TimeoutError) as e:
+        logging.warning(f"Transient error for REST endpoint {endpoint}: {e}")
+        is_healthy = False
+    except Exception as e:
+        logging.error(f"Error checking REST endpoint {endpoint}: {e}")
+        is_healthy = False
+
+    if not is_healthy:
+        dynamic_blacklist[endpoint] += 1
+
+    endpoint_health_cache[endpoint] = is_healthy
+    return endpoint, is_healthy
+
+
+async def get_healthy_rpc_endpoints_async(rpc_endpoints):
+    """Get healthy RPC endpoints asynchronously."""
+    session = await async_session_manager.get_session()
+    tasks = [is_rpc_endpoint_healthy_async(rpc["address"]) for rpc in rpc_endpoints]
+    results = await asyncio.gather(*tasks)
+    return [rpc for rpc, is_healthy in results if is_healthy][:3]  # Limit to top 3
+
+
+async def get_healthy_rest_endpoints_async(rest_endpoints):
+    """Get healthy REST endpoints asynchronously."""
+    session = await async_session_manager.get_session()
+    tasks = [is_rest_endpoint_healthy_async(rest["address"]) for rest in rest_endpoints]
+    results = await asyncio.gather(*tasks)
+    return [rest for rest, is_healthy in results if is_healthy][:3]  # Limit to top 3
+
+
+def fetch_data_for_network_async_wrapper(network, network_type, repo_path):
+    """Wrapper to run fetch_data_for_network asynchronously with retries."""
+    retries = 3
+    for attempt in range(retries):
+        try:
+            return asyncio.run(asyncio.wait_for(fetch_data_for_network_async(network, network_type, repo_path), timeout=60))
+        except asyncio.TimeoutError:
+            logging.warning(f"Timeout while processing network {network}, attempt {attempt + 1}/{retries}")
         except Exception as e:
-            pass
+            logging.error(f"Error processing network {network}, attempt {attempt + 1}/{retries}: {e}")
+        sleep(2 ** attempt)  # Exponential backoff
+    logging.error(f"Failed to process network {network} after {retries} attempts")
+    return None
 
-    return network_repo_semver_tags
 
-def find_best_semver_for_versions(network, network_version_strings, network_repo_semver_tags):
-    if len(network_repo_semver_tags) == 0:
-        return max(network_version_strings, key=len)
-
-    try:
-        # find version matches in the repo tags
-        possible_semvers = []
-        for version_string in network_version_strings:
-            if version_string.startswith("v"):
-                version_string = version_string[1:]
-
-            contains_minor_version = True
-            contains_patch_version = True
-
-            # our regex captures version strings like "v1" without a minor or patch version, so we need to check for that
-            # are these conditions good enough or is it missing any cases?
-            if "." not in version_string:
-                contains_minor_version = False
-                contains_patch_version = False
-                version_string = version_string + ".0.0"
-            elif version_string.count(".") == 1:
-                contains_patch_version = False
-                version_string = version_string + ".0"
-
-            current_semver = semantic_version.Version(version_string)
-
-            for semver_tag in network_repo_semver_tags:
-                # find matching tags based on what information we have
-                if semver_tag.major == current_semver.major:
-                    if contains_minor_version:
-                        if semver_tag.minor == current_semver.minor:
-                            if contains_patch_version:
-                                if semver_tag.patch == current_semver.patch:
-                                    possible_semvers.append(semver_tag)
-                            else:
-                                possible_semvers.append(semver_tag)
-                    else:
-                        possible_semvers.append(semver_tag)
-
-        # currently just return the highest semver from the list of possible matches. This may be too naive
-        if len(possible_semvers) != 0:
-            #sorting is built into the semantic version library
-            possible_semvers.sort(reverse=True)
-            semver = possible_semvers[0]
-            return f"v{semver.major}.{semver.minor}.{semver.patch}"
-    except Exception as e:
-        print(f"Failed to parse version strings into semvers for network {network}")
-        print(e)
-        return max(network_version_strings, key=len)
-
-    return max(network_version_strings, key=len)
-
-def fetch_data_for_networks_wrapper(network, network_type, repo_path):
-    """Wrapper function for fetching data for a given network. Prints the chain name that is erroring out for better visibility"""
-    try:
-        return fetch_data_for_network(network, network_type, repo_path)
-    except Exception as e:
-        print(f"Error fetching data for network {network}: {e}")
-        raise e
-
-def fetch_data_for_network(network, network_type, repo_path):
-    """Fetch data for a given network."""
-
+async def fetch_data_for_network_async(network, network_type, repo_path):
+    """Fetch data for a given network asynchronously."""
     # Construct the path to the chain.json file based on network type
     if network_type == "mainnet":
         chain_json_path = os.path.join(repo_path, network, "chain.json")
@@ -526,24 +295,12 @@ def fetch_data_for_network(network, network_type, repo_path):
     rest_endpoints = data.get("apis", {}).get("rest", [])
     rpc_endpoints = data.get("apis", {}).get("rpc", [])
 
+    # Use asynchronous methods for endpoint health checks
+    healthy_rpc_endpoints = await get_healthy_rpc_endpoints_async(rpc_endpoints)
+    healthy_rest_endpoints = await get_healthy_rest_endpoints_async(rest_endpoints)
+
     # Prioritize RPC endpoints for fetching the latest block height
     latest_block_height = -1
-    healthy_rpc_endpoints = get_healthy_rpc_endpoints(rpc_endpoints)
-    healthy_rest_endpoints = get_healthy_rest_endpoints(rest_endpoints)
-
-    if len(healthy_rpc_endpoints) == 0:
-        print(
-            f"No healthy RPC endpoints found for network {network} while searching through {len(rpc_endpoints)} endpoints. Skipping..."
-        )
-        err_output_data[
-            "error"
-        ] = f"insufficient data in Cosmos chain registry, no healthy RPC servers for {network}. Consider a PR to cosmos/chain-registry"
-        return err_output_data
-
-    # Shuffle the healthy endpoints
-    shuffle(healthy_rpc_endpoints)
-    shuffle(healthy_rest_endpoints)
-
     rpc_server_used = ""
     for rpc_endpoint in healthy_rpc_endpoints:
         if isinstance(rpc_endpoint, dict):
@@ -773,32 +530,50 @@ def fetch_data_for_network(network, network_type, repo_path):
     return output_data
 
 
+def reorder_data(data):
+    """Reorder the keys in the data dictionary for consistent output."""
+    ordered_data = OrderedDict(
+        [
+            ("type", data.get("type")),
+            ("network", data.get("network")),
+            ("rpc_server", data.get("rpc_server")),
+            ("rest_server", data.get("rest_server")),
+            ("latest_block_height", data.get("latest_block_height")),
+            ("upgrade_found", data.get("upgrade_found")),
+            ("upgrade_name", data.get("upgrade_name")),
+            ("source", data.get("source")),
+            ("upgrade_block_height", data.get("upgrade_block_height")),
+            ("estimated_upgrade_time", data.get("estimated_upgrade_time")),
+            ("upgrade_plan", data.get("upgrade_plan")),
+            ("version", data.get("version")),
+            ("error", data.get("error")),
+        ]
+    )
+    return ordered_data
+
+
 # periodic cache update
 def update_data():
     """Function to periodically update the data for mainnets and testnets."""
-
+    global last_fetch_time
     while True:
-        start_time = datetime.now()  # Capture the start time
-        print("Starting data update cycle...")
+        start_time = datetime.now()
+        logging.info("Starting data update cycle...")
 
         # Git clone or fetch & pull
         try:
             repo_path = fetch_repo()
-            print(f"Repo path: {repo_path}")
+            logging.info(f"Repo path: {repo_path}")
         except Exception as e:
-            print(f"Error downloading and extracting repo: {e}")
-            print("Error encountered. Sleeping for 5 seconds before retrying...")
+            logging.error(f"Error downloading and extracting repo: {e}")
             sleep(5)
             continue
 
         try:
-            # Process mainnets & testnets
+            # Process mainnets & testnets concurrently
             mainnet_networks = [
-                d
-                for d in os.listdir(repo_path)
-                if os.path.isdir(os.path.join(repo_path, d))
-                and not d.startswith((".", "_"))
-                and d != "testnets"
+                d for d in os.listdir(repo_path)
+                if os.path.isdir(os.path.join(repo_path, d)) and not d.startswith((".", "_")) and d != "testnets"
             ]
 
             if len(CHAIN_WATCH) != 0:
@@ -806,25 +581,26 @@ def update_data():
 
             testnet_path = os.path.join(repo_path, "testnets")
             testnet_networks = [
-                d
-                for d in os.listdir(testnet_path)
-                if os.path.isdir(os.path.join(testnet_path, d))
-                and not d.startswith((".", "_"))
+                d for d in os.listdir(testnet_path)
+                if os.path.isdir(os.path.join(testnet_path, d)) and not d.startswith((".", "_"))
             ]
 
             if len(CHAIN_WATCH) != 0:
                 testnet_networks = [d for d in testnet_networks if d in CHAIN_WATCH]
 
-            with ThreadPoolExecutor() as executor:
+            # Dynamically adjust thread pool size
+            total_networks = len(mainnet_networks) + len(testnet_networks)
+            pool_size = min(num_workers, total_networks)
+
+            with ThreadPoolExecutor(max_workers=pool_size) as executor:
                 testnet_data = list(
                     filter(
                         None,
                         executor.map(
-                            lambda network, path: fetch_data_for_networks_wrapper(
-                                network, "testnet", path
+                            lambda network: fetch_data_for_network_async_wrapper(
+                                network, "testnet", repo_path
                             ),
                             testnet_networks,
-                            [repo_path] * len(testnet_networks),
                         ),
                     )
                 )
@@ -832,11 +608,10 @@ def update_data():
                     filter(
                         None,
                         executor.map(
-                            lambda network, path: fetch_data_for_networks_wrapper(
-                                network, "mainnet", path
+                            lambda network: fetch_data_for_network_async_wrapper(
+                                network, "mainnet", repo_path
                             ),
                             mainnet_networks,
-                            [repo_path] * len(mainnet_networks),
                         ),
                     )
                 )
@@ -848,7 +623,7 @@ def update_data():
             elapsed_time = (
                 datetime.now() - start_time
             ).total_seconds()  # Calculate the elapsed time
-            print(
+            logging.info(
                 f"Data update cycle completed in {elapsed_time} seconds. Sleeping for 1 minute..."
             )
             sleep(60)
@@ -856,9 +631,8 @@ def update_data():
             elapsed_time = (
                 datetime.now() - start_time
             ).total_seconds()  # Calculate the elapsed time in case of an error
-            traceback.print_exc()
-            print(f"Error in update_data loop after {elapsed_time} seconds: {e}")
-            print("Error encountered. Sleeping for 1 minute before retrying...")
+            logging.error(f"Error in update_data loop after {elapsed_time} seconds: {e}")
+            logging.info("Error encountered. Sleeping for 1 minute before retrying...")
             sleep(60)
 
 
@@ -900,6 +674,17 @@ def get_testnet_data():
     return Response(
         json.dumps(reordered_results) + "\n", content_type="application/json"
     )
+
+
+@app.before_first_request
+def initialize_async_session():
+    """Ensure the aiohttp session is closed when the app shuts down."""
+    import atexit
+
+    async def close_session():
+        await async_session_manager.close_session()
+
+    atexit.register(lambda: asyncio.run(close_session()))
 
 
 if __name__ == "__main__":
