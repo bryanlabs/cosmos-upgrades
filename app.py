@@ -80,31 +80,16 @@ CHAIN_WATCH = get_chain_watch_env_var()
 
 # Clone the repo
 def fetch_repo():
-    """Clone the GitHub repository or update it if it already exists."""
+    """Clone or update the chain registry repository."""
     repo_clone_url = "https://github.com/cosmos/chain-registry.git"
     repo_dir = os.path.join(os.getcwd(), "chain-registry")
-
-    if os.path.exists(repo_dir):
-        old_wd = os.getcwd()
-        print(f"Repository already exists. Fetching and pulling latest changes...")
-        try:
-            # Navigate to the repo directory
-            os.chdir(repo_dir)
-            # Fetch the latest changes
-            subprocess.run(["git", "fetch"], check=True)
-            # Pull the latest changes
-            subprocess.run(["git", "pull"], check=True)
-        except subprocess.CalledProcessError:
-            raise Exception("Failed to fetch and pull the latest changes.")
-        finally:
-            os.chdir(old_wd)
-    else:
-        print(f"Cloning repo {repo_clone_url}...")
-        try:
-            subprocess.run(["git", "clone", repo_clone_url], check=True)
-        except subprocess.CalledProcessError:
-            raise Exception("Failed to clone the repository.")
-
+    try:
+        if os.path.exists(repo_dir):
+            subprocess.run(["git", "-C", repo_dir, "pull"], check=True)
+        else:
+            subprocess.run(["git", "clone", repo_clone_url, repo_dir], check=True)
+    except subprocess.CalledProcessError as e:
+        raise Exception(f"Failed to fetch the repository: {e}")
     return repo_dir
 
 
@@ -364,27 +349,25 @@ def fetch_current_upgrade_plan(rest_url, network, network_repo_url):
         )
         raise e
 
+# Add pagination support for GitHub API
 def fetch_network_repo_tags(network, network_repo):
     if "github.com" in network_repo:
         try:
             repo_parts = network_repo.split("/")
             repo_name = repo_parts[-1]
             repo_owner = repo_parts[-2]
-
-            if not repo_name or not repo_owner:
-                print(f"Could not parse github repo name or owner for {network}")
-                return []
-
-            tags_url = GITHUB_API_URL + f"/repos/{repo_owner}/{repo_name}/tags"
-            tags = requests.get(tags_url)
-            return list(map(lambda tag: tag["name"], tags.json()))
+            tags_url = f"{GITHUB_API_URL}/repos/{repo_owner}/{repo_name}/tags"
+            tags = []
+            while tags_url:
+                response = requests.get(tags_url)
+                response.raise_for_status()
+                tags.extend(response.json())
+                tags_url = response.links.get("next", {}).get("url")
+            return [tag["name"] for tag in tags]
         except Exception as e:
-            print(f"Could not fetch tags from github for network {network}")
-            print(e)
+            print(f"Error fetching tags for {network}: {e}")
             return []
-    else:
-        print(f"Could not fetch tags from github for network {network}: unsupported repo url {network_repo}")
-        return []
+    return []
 
 def get_network_repo_semver_tags(network, network_repo_url):
     cached_tags = cache.get(network_repo_url + "_tags")
@@ -608,6 +591,7 @@ def fetch_data_for_network(network, network_type, repo_path):
     rest_server_used = ""
 
     for index, rest_endpoint in enumerate(healthy_rest_endpoints):
+        # Validate rest_endpoint format
         if not isinstance(rest_endpoint, dict) or "address" not in rest_endpoint:
             print(f"Invalid rest endpoint format for network {network}: {rest_endpoint}")
             continue
@@ -917,6 +901,23 @@ def get_testnet_data():
     return Response(
         json.dumps(reordered_results) + "\n", content_type="application/json"
     )
+
+@app.route("/chains")
+def get_chains():
+    """List all available chains from the chain registry."""
+    try:
+        repo_path = fetch_repo()
+        mainnet_chains = [
+            d for d in os.listdir(repo_path)
+            if os.path.isdir(os.path.join(repo_path, d)) and not d.startswith((".", "_")) and d != "testnets"
+        ]
+        testnet_chains = [
+            d for d in os.listdir(os.path.join(repo_path, "testnets"))
+            if os.path.isdir(os.path.join(repo_path, "testnets", d))
+        ]
+        return jsonify({"mainnets": mainnet_chains, "testnets": testnet_chains}), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 if __name__ == "__main__":
