@@ -14,24 +14,20 @@ import os
 import json
 import subprocess
 import semantic_version
-import structlog
 import logging
+import sys
+from loguru import logger
 
 app = Flask(__name__)
 
-# Configure structlog for colorized and structured logging
-structlog.configure(
-    processors=[
-        structlog.processors.TimeStamper(fmt="iso"),
-        structlog.dev.ConsoleRenderer(colors=True),
-    ],
-    context_class=dict,
-    logger_factory=structlog.stdlib.LoggerFactory(),
-    wrapper_class=structlog.make_filtering_bound_logger(logging.DEBUG),
-    cache_logger_on_first_use=True,
+# Configure loguru for colorized logging
+logger.remove()  # Remove default logger
+logger.add(
+    sys.stderr,
+    format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>",
+    colorize=True,
+    level="INFO",  # Set default level to INFO
 )
-
-logger = structlog.get_logger()
 
 # Suppress only the single InsecureRequestWarning from urllib3
 requests.packages.urllib3.disable_warnings(
@@ -616,7 +612,7 @@ def fetch_data_for_network(network, network_type, repo_path):
     source = ""
     rest_server_used = ""
 
-    for index, rest_endpoint in enumerate(healthy_rest_endpoints):
+    for rest_endpoint in healthy_rest_endpoints:  # Fix unpacking issue
         # Validate rest_endpoint format
         if not isinstance(rest_endpoint, dict) or "address" not in rest_endpoint:
             logger.info("Invalid rest endpoint format for network", network=network, rest_endpoint=rest_endpoint)
@@ -663,18 +659,11 @@ def fetch_data_for_network(network, network_type, repo_path):
             upgrade_plan_check_failed = True
 
         if active_upgrade_check_failed and upgrade_plan_check_failed:
-            if index + 1 < len(healthy_rest_endpoints):
-                logger.info(
-                    "Failed to query rest endpoints, trying next rest endpoint",
-                    current_endpoint=current_endpoint,
-                )
-                continue
-            else:
-                logger.info(
-                    "Failed to query rest endpoints, all out of endpoints to try",
-                    current_endpoint=current_endpoint,
-                )
-                break
+            logger.info(
+                "Failed to query rest endpoints, trying next rest endpoint",
+                current_endpoint=current_endpoint,
+            )
+            continue
 
         if active_upgrade_check_failed and network not in NETWORKS_NO_GOV_MODULE:
             logger.info(
