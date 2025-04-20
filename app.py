@@ -30,6 +30,7 @@ app = Flask(__name__)
 # Set log level based on environment variable
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
 logger.remove()
+logger = logger.bind(network="GLOBAL")  # Ensure 'network' key is always present
 if LOG_LEVEL == "DEBUG":
     logger.add(
         sys.stderr,
@@ -1040,4 +1041,4 @@ def get_chains():
 if __name__ == "__main__":
     app.debug = True
     start_update_data_thread()
-    app.run(host="0.0.0.0", use_reloader=False)
+    app.run(host="0.0.0.0", port=5001, use_reloader=False)

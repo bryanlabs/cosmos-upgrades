@@ -1,4 +1,5 @@
 env/
+venv/
 app.log
 chain-registry.zip
 cosmos-chain-registry*
