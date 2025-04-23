@@ -17,7 +17,8 @@ import semantic_version
 import logging
 import sys
 from loguru import logger
-from dotenv import load_dotenv  # Import dotenv to load .env files
+from dotenv import load_dotenv
+import base64  # Add base64 import
 
 # Load environment variables from .env file
 load_dotenv()
@@ -72,6 +73,14 @@ NETWORKS_NO_GOV_MODULE = [
     "noble",
     "nobletestnet",
 ]
+
+# Configuration for chains using CosmWasm Governance for upgrades
+COSMWASM_GOV_CONFIG = {
+    "neutron": {
+        "contract_address": "neutron1suhgf5svhu4usrurvxzlgn54ksxmn8gljarjtxqnapv8kjnp4nrs7d743d",  # Neutron DAO Core
+        "query_type": "list_proposals",  # Assumes a list_proposals query pattern
+    }
+}
 
 # Global variables to store the data for mainnets and testnets
 MAINNET_DATA = []
@@ -581,6 +590,162 @@ def find_best_semver_for_versions(network, network_version_strings, network_repo
 
     return max(network_version_strings, key=len)
 
+def fetch_cosmwasm_upgrade_proposal(rest_url, contract_address, query_type, network_name, network_repo_url):
+    """
+    Fetches software upgrade proposals from a CosmWasm governance contract.
+    """
+    network_logger = logger.bind(network=network_name.upper())
+    network_logger.debug(f"Attempting CosmWasm query '{query_type}' for {network_name} gov contract {contract_address} at {rest_url}")
+
+    # --- Construct Query ---
+    # Adapt query based on query_type, assuming list_proposals for now
+    if query_type == "list_proposals":
+         # Query last ~20 proposals, hoping active ones are recent. Add pagination if needed.
+        query_msg = {"list_proposals": {"limit": 20}}
+    else:
+        network_logger.error(f"Unsupported CosmWasm query type: {query_type}")
+        return None, None, None
+
+    query_msg_json = json.dumps(query_msg)
+    query_msg_base64 = base64.b64encode(query_msg_json.encode('utf-8')).decode('utf-8')
+    api_url = f"{rest_url}/cosmwasm/wasm/v1/contract/{contract_address}/smart/{query_msg_base64}"
+
+    try:
+        response = requests.get(api_url, timeout=10, verify=False) # Increased timeout
+        response.raise_for_status()
+        data = response.json()
+
+        proposals_data = data.get("data", {}).get("proposals", [])
+        network_logger.debug(f"Found {len(proposals_data)} proposals via CosmWasm query")
+
+        # Iterate proposals in reverse (newest first)
+        for prop_container in reversed(proposals_data):
+            proposal = prop_container.get("proposal", {})
+            prop_id = prop_container.get("id")
+            status = proposal.get("status", "unknown").lower()
+
+            # Only consider proposals that might be active or recently passed
+            # Adjust statuses based on the specific contract's state machine
+            if status not in ["open", "passed", "executed", "neutron.cron.Schedule"]: # Neutron might use Schedule status
+                network_logger.debug(f"Skipping proposal {prop_id} with status '{status}'")
+                continue
+
+            network_logger.debug(f"Checking proposal ID {prop_id} with status '{status}'")
+
+            msgs = proposal.get("msgs", [])
+            for msg_container in msgs:
+                # Check for Stargate message first (more standard)
+                stargate_msg = msg_container.get("stargate")
+                if stargate_msg:
+                    type_url = stargate_msg.get("type_url")
+                    value_b64 = stargate_msg.get("value")
+                    if type_url == "/cosmos.upgrade.v1beta1.MsgSoftwareUpgrade" and value_b64:
+                        network_logger.debug(f"Found Stargate MsgSoftwareUpgrade in proposal {prop_id}")
+                        # Attempt to parse the base64 value
+                        # NOTE: Proper protobuf parsing is needed here for reliability.
+                        # Using a placeholder regex approach for now.
+                        plan_name_approx, version_approx, height_approx = parse_stargate_msg_software_upgrade(value_b64)
+
+                        if height_approx and height_approx > 0:
+                             # Use the approximate version found by regex
+                             version = version_approx # Or try to refine using find_best_semver_for_versions if needed
+                             if version:
+                                 network_logger.info(f"Found {network_name} upgrade via CosmWasm (Stargate): Name={plan_name_approx}, Version={version}, Height={height_approx}")
+                                 return plan_name_approx, version, height_approx
+                             else:
+                                 network_logger.warning(f"Could not determine version for Stargate upgrade in prop {prop_id}")
+                        continue # Move to next message if parsing failed
+
+                # Placeholder: Check for Wasm Execute message (less standard for x/upgrade)
+                wasm_execute = msg_container.get("wasm", {}).get("execute", {})
+                if wasm_execute:
+                    try:
+                        inner_msg_b64 = wasm_execute.get("msg")
+                        if inner_msg_b64:
+                            inner_msg_json = base64.b64decode(inner_msg_b64).decode('utf-8')
+                            inner_msg = json.loads(inner_msg_json)
+
+                            # Look for a specific pattern like 'schedule_upgrade'
+                            schedule_upgrade = inner_msg.get("schedule_upgrade", {})
+                            plan = schedule_upgrade.get("plan", {})
+                            if plan:
+                                network_logger.debug(f"Found potential Wasm 'schedule_upgrade' in proposal {prop_id}", plan=plan)
+                                plan_name = plan.get("name")
+                                height_str = plan.get("height")
+                                info_str = plan.get("info", "") # Info might contain version
+
+                                height = 0
+                                try:
+                                    height = int(height_str)
+                                except (ValueError, TypeError):
+                                    network_logger.warning(f"Could not parse height '{height_str}' for Wasm upgrade in prop {prop_id}")
+                                    continue
+
+                                version = None
+                                search_text = f"{plan_name} {info_str}"
+                                versions = SEMANTIC_VERSION_PATTERN.findall(search_text)
+                                if versions:
+                                    network_repo_semver_tags = get_network_repo_semver_tags(network_name, network_repo_url)
+                                    version = find_best_semver_for_versions(network_name, versions, network_repo_semver_tags)
+
+                                if version and height > 0:
+                                    network_logger.info(f"Found {network_name} upgrade via CosmWasm (Wasm Execute): Name={plan_name}, Version={version}, Height={height}")
+                                    return plan_name, version, height
+                                else:
+                                     network_logger.debug(f"Wasm plan found in {prop_id} but missing version or valid height", name=plan_name, version=version, height=height)
+
+                    except Exception as decode_err:
+                        network_logger.debug(f"Error decoding/parsing Wasm execute msg for proposal {prop_id}", error=str(decode_err))
+                        continue
+
+        network_logger.debug("No suitable software upgrade message found in recent CosmWasm proposals.")
+        return None, None, None
+
+    except requests.exceptions.RequestException as e:
+        status_code = "N/A"
+        response_text = "N/A"
+        if e.response is not None:
+            status_code = e.response.status_code
+            try:
+                # Try to get response text, but handle cases where it might not be text/JSON
+                response_text = e.response.text
+            except Exception:
+                response_text = "(Could not decode response body)"
+
+        network_logger.error(
+            f"RequestException during {network_name} CosmWasm query",
+            server=rest_url,
+            contract=contract_address,
+            api_url=api_url, # Log the exact URL queried
+            status_code=status_code,
+            response_body=response_text[:500], # Log first 500 chars of response
+            error=str(e),
+        )
+        return None, None, None
+    except Exception as e:
+        network_logger.error(
+            f"Unhandled error during {network_name} CosmWasm query",
+            server=rest_url, contract=contract_address, api_url=api_url, error=str(e), trace=traceback.format_exc(),
+        )
+        return None, None, None
+
+
+def parse_stargate_msg_software_upgrade(msg_value_base64):
+    """Parses a base64 encoded MsgSoftwareUpgrade proto message."""
+    try:
+        decoded_bytes = base64.b64decode(msg_value_base64)
+        decoded_str = decoded_bytes.decode('latin-1')  # Use latin-1 to avoid decode errors
+        plan_match = re.search(r'plan.*name.*"(v[^"]+)".*height.*(\d+)', decoded_str, re.IGNORECASE | re.DOTALL)
+        if plan_match:
+            name_approx = plan_match.group(1)
+            height_approx = int(plan_match.group(2))
+            logger.warning("Using unreliable regex parsing for Stargate MsgSoftwareUpgrade", name=name_approx, height=height_approx)
+            return name_approx, name_approx, height_approx
+    except Exception as e:
+        logger.error("Failed during Stargate message parsing", error=str(e))
+    return None, None, None
+
+
 def fetch_data_for_networks_wrapper(network, network_type, repo_path):
     network_logger = logger.bind(network=network.upper())  # Bind the network name to the logger
     try:
@@ -753,166 +918,126 @@ def fetch_data_for_network(network, network_type, repo_path):
     upgrade_version = ""
     source = ""
     rest_server_used = ""
-    neutron_custom_gov_notice = False  # Flag for Neutron specific message
+    output_data = {}  # Initialize output_data here
 
-    for rest_endpoint in healthy_rest_endpoints:  # Fix unpacking issue
-        # Validate rest_endpoint format
-        if not isinstance(rest_endpoint, dict) or "address" not in rest_endpoint:
-            network_logger.debug("Invalid rest endpoint format for network", rest_endpoint=rest_endpoint)
-            continue
-
+    for rest_endpoint in healthy_rest_endpoints:
         current_endpoint = rest_endpoint["address"]
         network_logger.debug(f"Trying REST endpoint: {current_endpoint}")
-
 
         if current_endpoint in SERVER_BLACKLIST:
             network_logger.debug(f"Skipping blacklisted REST endpoint: {current_endpoint}")
             continue
 
-        active_upgrade_check_failed = False
-        upgrade_plan_check_failed = False
+        # Reset results for this endpoint
         active_upgrade_name, active_upgrade_version, active_upgrade_height = None, None, None
         current_upgrade_name, current_upgrade_version, current_upgrade_height, current_plan_dump = None, None, None, None
+        cosmwasm_upgrade_name, cosmwasm_upgrade_version, cosmwasm_upgrade_height = None, None, None
+        found_upgrade_on_endpoint = False
 
+        # 1. Try standard active proposals (if applicable)
+        if network not in NETWORKS_NO_GOV_MODULE:
+            try:
+                network_logger.debug(f"Fetching standard active upgrade proposals from {current_endpoint}")
+                (
+                    active_upgrade_name, active_upgrade_version, active_upgrade_height
+                ) = fetch_active_upgrade_proposals(current_endpoint, network, network_repo_url)
+                network_logger.debug("Standard active proposal result", name=active_upgrade_name, version=active_upgrade_version, height=active_upgrade_height)
+            except Exception as e:
+                network_logger.debug(f"Standard active proposal check failed for {current_endpoint}", error=str(e))
+
+        # 2. Try standard current plan
         try:
-            if network in NETWORKS_NO_GOV_MODULE:
-                network_logger.debug("Network is in NETWORKS_NO_GOV_MODULE, skipping active proposal check.")
-                raise Exception("Network does not have gov module")
-            network_logger.debug(f"Fetching active upgrade proposals from {current_endpoint}")
+            network_logger.debug(f"Fetching standard current upgrade plan from {current_endpoint}")
             (
-                active_upgrade_name,
-                active_upgrade_version,
-                active_upgrade_height,
-            ) = fetch_active_upgrade_proposals(current_endpoint, network, network_repo_url)
-            network_logger.debug(
-                "Active upgrade proposal result",
-                name=active_upgrade_name,
-                version=active_upgrade_version,
-                height=active_upgrade_height,
-            )
-
-        except Exception as e:
-            network_logger.debug(f"Attempt to fetch active upgrade proposals from {current_endpoint} failed overall", entry_point_error=str(e))
-            (
-                active_upgrade_name,
-                active_upgrade_version,
-                active_upgrade_height,
-            ) = (None, None, None)
-            active_upgrade_check_failed = True
-            if network == "neutron":  # Check if it's Neutron failing
-                neutron_custom_gov_notice = True
-
-        try:
-            network_logger.debug(f"Fetching current upgrade plan from {current_endpoint}")
-            (
-                current_upgrade_name,
-                current_upgrade_version,
-                current_upgrade_height,
-                current_plan_dump,
+                current_upgrade_name, current_upgrade_version, current_upgrade_height, current_plan_dump
             ) = fetch_current_upgrade_plan(current_endpoint, network, network_repo_url)
-            network_logger.debug(
-                "Current upgrade plan result",
-                name=current_upgrade_name,
-                version=current_upgrade_version,
-                height=current_upgrade_height,
-                plan_dump=current_plan_dump is not None,
-            )
+            network_logger.debug("Standard current plan result", name=current_upgrade_name, version=current_upgrade_version, height=current_upgrade_height)
         except Exception as e:
-            network_logger.debug(f"Attempt to fetch current upgrade plan from {current_endpoint} failed overall", entry_point_error=str(e))
-            (
-                current_upgrade_name,
-                current_upgrade_version,
-                current_upgrade_height,
-                current_plan_dump,
-            ) = (None, None, None, None)
-            upgrade_plan_check_failed = True
-            if network == "neutron":  # Check if it's Neutron failing
-                neutron_custom_gov_notice = True
+            network_logger.debug(f"Standard current plan check failed for {current_endpoint}", error=str(e))
 
-        if active_upgrade_check_failed and upgrade_plan_check_failed:
-            network_logger.debug(
-                "Both active proposal and current plan checks failed, trying next rest endpoint",
-                current_endpoint=current_endpoint,
-            )
-            continue
+        # 3. Try CosmWasm governance if configured
+        if network in COSMWASM_GOV_CONFIG:
+            config = COSMWASM_GOV_CONFIG[network]
+            try:
+                (
+                    cosmwasm_upgrade_name, cosmwasm_upgrade_version, cosmwasm_upgrade_height
+                ) = fetch_cosmwasm_upgrade_proposal(
+                    current_endpoint,
+                    config["contract_address"],
+                    config["query_type"],
+                    network,
+                    network_repo_url
+                )
+                # Logging is inside the function
+            except Exception as e:
+                 network_logger.error(f"CosmWasm check failed unexpectedly for {current_endpoint}", error=str(e))
 
-        if active_upgrade_check_failed and network not in NETWORKS_NO_GOV_MODULE:
-            network_logger.debug(
-                "Failed to query active upgrade endpoint (and network has gov module), trying next rest endpoint",
-                current_endpoint=current_endpoint,
-            )
-            continue
+        # 4. Evaluate results (Prioritize standard, then CosmWasm)
+        network_logger.debug("Evaluating upgrade results for endpoint...")
+        # ... (Log details of each result type) ...
 
-        # Decision logic logging
-        network_logger.debug("Evaluating upgrade results...")
-        network_logger.debug(f"Latest Block Height: {latest_block_height}")
-        network_logger.debug(f"Active Upgrade: Name={active_upgrade_name}, Version={active_upgrade_version}, Height={active_upgrade_height}")
-        network_logger.debug(f"Current Plan: Name={current_upgrade_name}, Version={current_upgrade_version}, Height={current_upgrade_height}")
-
-        if (
-            active_upgrade_version
-            and (active_upgrade_height is not None)
-            and active_upgrade_height > latest_block_height
-        ):
-            network_logger.debug(f"Found valid active upgrade proposal: Height {active_upgrade_height} > {latest_block_height}")
+        # Check standard active proposal first
+        if active_upgrade_version and active_upgrade_height and active_upgrade_height > latest_block_height:
+            network_logger.debug(f"Using valid standard active upgrade proposal: Height {active_upgrade_height} > {latest_block_height}")
             upgrade_block_height = active_upgrade_height
             upgrade_version = active_upgrade_version
             upgrade_name = active_upgrade_name
             source = "active_upgrade_proposals"
-            rest_server_used = current_endpoint
-            neutron_custom_gov_notice = False  # Found via standard method
-            break
-        elif (
-            current_upgrade_version
-            and (current_upgrade_height is not None)
-            and (current_plan_dump is not None)
-            and current_upgrade_height > latest_block_height
-        ):
-            network_logger.debug(f"Found valid current upgrade plan: Height {current_upgrade_height} > {latest_block_height}")
+            found_upgrade_on_endpoint = True
+        # Else check standard current plan
+        elif current_upgrade_version and current_upgrade_height and current_plan_dump and current_upgrade_height > latest_block_height:
+            network_logger.debug(f"Using valid standard current upgrade plan: Height {current_upgrade_height} > {latest_block_height}")
             upgrade_block_height = current_upgrade_height
-            upgrade_plan = json.loads(current_plan_dump)
+            upgrade_plan_data = json.loads(current_plan_dump)  # Renamed variable
             upgrade_version = current_upgrade_version
             upgrade_name = current_upgrade_name
             source = "current_upgrade_plan"
-            rest_server_used = current_endpoint
-            neutron_custom_gov_notice = False  # Found via standard method
-            # Extract the relevant information from the parsed JSON
+            # Extract plan details
             info = {}
             binaries = []
+            plan_height = -1
             try:
-                info = json.loads(upgrade_plan.get("info", "{}"))
+                info = json.loads(upgrade_plan_data.get("info", "{}"))
                 binaries = info.get("binaries", {})
-            except:
-                network_logger.debug("Failed to parse binaries for network. Non-fatal error, skipping...")
-                pass
+                plan_height = int(upgrade_plan_data.get("height", -1))
+            except Exception as parse_err:
+                network_logger.debug("Failed to parse plan details. Non-fatal.", error=str(parse_err))
+                plan_height = -1  # Reset height if parsing failed
 
-            plan_height = upgrade_plan.get("height", -1)
-            try:
-                plan_height = int(plan_height)
-            except ValueError:
-                plan_height = -1
-
-            # Include the expanded information in the output data
             output_data["upgrade_plan"] = {
-                "height": plan_height,
+                "height": plan_height if plan_height != -1 else None,
                 "binaries": binaries,
-                "name": upgrade_plan.get("name", None),
-                "upgraded_client_state": upgrade_plan.get("upgraded_client_state", None),
+                "name": upgrade_plan_data.get("name", None),
+                "upgraded_client_state": upgrade_plan_data.get("upgraded_client_state", None),
             }
-            break
-        else:
-            network_logger.debug("No valid future upgrade found from this endpoint.")
+            found_upgrade_on_endpoint = True
+        # Else check CosmWasm result
+        elif cosmwasm_upgrade_version and cosmwasm_upgrade_height and cosmwasm_upgrade_height > latest_block_height:
+            network_logger.debug(f"Using valid CosmWasm upgrade proposal: Height {cosmwasm_upgrade_height} > {latest_block_height}")
+            upgrade_block_height = cosmwasm_upgrade_height
+            upgrade_version = cosmwasm_upgrade_version
+            upgrade_name = cosmwasm_upgrade_name
+            source = "cosmwasm_governance"
+            # Note: We don't have the full 'plan' details easily from this method currently
+            output_data["upgrade_plan"] = None  # Clear any plan from previous loops/endpoints
+            found_upgrade_on_endpoint = True
+
+        # If any upgrade found on this endpoint, break the loop
+        if found_upgrade_on_endpoint:
             rest_server_used = current_endpoint
+            network_logger.info(f"Upgrade found for {network} via {source} on endpoint {current_endpoint}. Breaking endpoint loop.")
+            break # Exit the loop over REST endpoints
+        else:
+            network_logger.debug(f"No valid future upgrade found using endpoint {current_endpoint}. Continuing to next endpoint if available.")
+            # Keep track of the last endpoint tried, in case none find an upgrade
+            rest_server_used = current_endpoint # Update last tried endpoint
 
-        if not active_upgrade_version and not current_upgrade_version and not active_upgrade_check_failed and not upgrade_plan_check_failed:
-             network_logger.debug("Successfully queried endpoint, but no upgrade proposal or plan found.")
-             rest_server_used = current_endpoint
-             break
+    # --- Post-Loop Processing ---
+    if not upgrade_version:  # Check if loop finished without finding an upgrade
+        network_logger.info(f"No future upgrade found for {network} after checking all healthy REST endpoints.")
+        # rest_server_used will hold the last endpoint checked
 
-    # After the loop, if no upgrade was found and it's Neutron, log the notice
-    if neutron_custom_gov_notice and not upgrade_version:
-        network_logger.info("Standard gov/upgrade checks failed for Neutron. This network uses custom CosmWasm governance (neutron.gov) which is not currently checked by this script.")
-
+    # Fetch block times (using healthy_rpc_endpoints)
     current_block_time = None
     past_block_time = None
     network_logger.debug("Fetching block times...")
@@ -948,7 +1073,8 @@ def fetch_data_for_network(network, network_type, repo_path):
     else:
         network_logger.debug(f"Upgrade block height is None. Skipping upgrade time estimation.")
 
-    output_data = {
+    # Construct final output_data dictionary (ensure upgrade_plan is included if found)
+    final_output_data = {
         "network": network,
         "type": network_type,
         "rpc_server": rpc_server_used,
@@ -958,14 +1084,14 @@ def fetch_data_for_network(network, network_type, repo_path):
         "upgrade_name": upgrade_name,
         "source": source,
         "upgrade_block_height": upgrade_block_height,
-        "upgrade_plan": output_data.get("upgrade_plan", None),
+        "upgrade_plan": output_data.get("upgrade_plan", None),  # Get plan if set in loop
         "estimated_upgrade_time": estimated_upgrade_time,
         "version": upgrade_version,
         "logo_urls": logo_urls,
         "explorer_url": explorer_url,
     }
-    network_logger.debug("Completed fetch data for network", final_data=output_data)
-    return output_data
+    network_logger.debug("Completed fetch data for network", final_data=final_output_data)
+    return final_output_data
 
 
 # periodic cache update
@@ -1122,6 +1248,8 @@ def get_chains():
 
 
 if __name__ == "__main__":
+    class RequiresGovV1Exception(Exception):
+        pass
     app.debug = True
     start_update_data_thread()
     app.run(host="0.0.0.0", port=5001, use_reloader=False)
