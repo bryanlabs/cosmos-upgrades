@@ -298,6 +298,7 @@ def fetch_active_upgrade_proposals(rest_url, network, network_repo_url):
 
 
 def fetch_active_upgrade_proposals_v1beta1(rest_url, network, network_repo_url):
+    network_logger = logger.bind(network=network.upper())  # Add logger binding
     try:
         response = requests.get(
             f"{rest_url}/cosmos/gov/v1beta1/proposals?proposal_status=2", verify=False
@@ -351,21 +352,29 @@ def fetch_active_upgrade_proposals_v1beta1(rest_url, network, network_repo_url):
                     return plan_name, version, height
         return None, None, None
     except requests.RequestException as e:
+        status_code = e.response.status_code if e.response is not None else "N/A"
         network_logger.error(
-            "Error received from server",
+            "RequestException received from server during v1beta1 proposal fetch",
             server=rest_url,
+            status_code=status_code,
             error=str(e),
         )
         raise e
     except RequiresGovV1Exception as e:
+        network_logger.debug("RequiresGovV1Exception caught, will try v1 endpoint", server=rest_url)
         raise e
     except Exception as e:
-        print(
-            f"Unhandled error while requesting active upgrade endpoint from {rest_url}: {e}"
+        network_logger.error(
+            f"Unhandled error while requesting v1beta1 active upgrade endpoint",
+            server=rest_url,
+            error=str(e),
+            error_type=type(e).__name__,
+            trace=traceback.format_exc()
         )
         raise e
     
 def fetch_active_upgrade_proposals_v1(rest_url, network, network_repo_url):
+    network_logger = logger.bind(network=network.upper())  # Add logger binding
     try:
         response = requests.get(
             f"{rest_url}/cosmos/gov/v1/proposals?proposal_status=2", verify=False
@@ -411,13 +420,21 @@ def fetch_active_upgrade_proposals_v1(rest_url, network, network_repo_url):
                         return plan_name, version, height
         return None, None, None
     except requests.RequestException as e:
-        print(f"Error received from server {rest_url}: {e}")
+        status_code = e.response.status_code if e.response is not None else "N/A"
+        network_logger.error(
+            "RequestException received from server during v1 proposal fetch",
+            server=rest_url,
+            status_code=status_code,
+            error=str(e),
+        )
         raise e
     except Exception as e:
         network_logger.error(
-            "Unhandled error while requesting active upgrade endpoint",
+            "Unhandled error while requesting v1 active upgrade endpoint",
             server=rest_url,
             error=str(e),
+            error_type=type(e).__name__,
+            trace=traceback.format_exc()
         )
         raise e
 
@@ -452,9 +469,11 @@ def fetch_current_upgrade_plan(rest_url, network, network_repo_url):
 
         return None, None, None, None
     except requests.RequestException as e:
+        status_code = e.response.status_code if e.response is not None else "N/A"
         network_logger.error(
-            "Error received from server",
+            "RequestException received from server during current plan fetch",
             server=rest_url,
+            status_code=status_code,
             error=str(e),
         )
         raise e
@@ -463,6 +482,8 @@ def fetch_current_upgrade_plan(rest_url, network, network_repo_url):
             "Unhandled error while requesting current upgrade endpoint",
             server=rest_url,
             error=str(e),
+            error_type=type(e).__name__,
+            trace=traceback.format_exc()
         )
         raise e
 
@@ -612,6 +633,7 @@ def fetch_explorer_urls(data):
 def fetch_data_for_network(network, network_type, repo_path):
     """Fetch data for a given network."""
     network_logger = logger.bind(network=network.upper())  # Bind the network name to the logger
+    network_logger.debug("Starting data fetch for network")
 
     # Skip networks in the blacklist
     if network.upper() in NETWORK_BLACKLIST:
@@ -644,22 +666,28 @@ def fetch_data_for_network(network, network_type, repo_path):
     # Load the chain.json data
     with open(chain_json_path, "r") as file:
         data = json.load(file)
+    network_logger.debug("Loaded chain.json data")
 
     network_repo_url = data.get("codebase", {}).get("git_repo", None)
+    network_logger.debug("Network repo URL", url=network_repo_url)
 
     rest_endpoints = data.get("apis", {}).get("rest", [])
     rpc_endpoints = data.get("apis", {}).get("rpc", [])
 
     # Fetch logo URLs
     logo_urls = fetch_logo_urls(data)
+    network_logger.debug("Fetched logo URLs", urls=logo_urls)
 
     # Fetch explorer URLs
     explorer_url = fetch_explorer_urls(data)
+    network_logger.debug("Fetched explorer URL", url=explorer_url)
 
     # Prioritize RPC endpoints for fetching the latest block height
     latest_block_height = -1
     healthy_rpc_endpoints = get_healthy_rpc_endpoints(rpc_endpoints)
     healthy_rest_endpoints = get_healthy_rest_endpoints(rest_endpoints)
+    network_logger.debug(f"Found {len(healthy_rpc_endpoints)} healthy RPC endpoints and {len(healthy_rest_endpoints)} healthy REST endpoints")
+
 
     if len(healthy_rpc_endpoints) == 0:
         network_logger.error(
@@ -681,10 +709,15 @@ def fetch_data_for_network(network, network_type, repo_path):
             network_logger.debug("Invalid rpc endpoint format for network", rpc_endpoint=rpc_endpoint)
             continue
 
+        network_logger.debug(f"Trying RPC endpoint: {rpc_endpoint.get('address')}")
         latest_block_height = get_latest_block_height_rpc(rpc_endpoint["address"])
         if latest_block_height > 0:
             rpc_server_used = rpc_endpoint["address"]
+            network_logger.debug(f"Successfully fetched latest block height {latest_block_height} from {rpc_server_used}")
             break
+        else:
+            network_logger.debug(f"Failed to fetch latest block height from {rpc_endpoint.get('address')}")
+
 
     if latest_block_height < 0:
         network_logger.error(
@@ -720,6 +753,7 @@ def fetch_data_for_network(network, network_type, repo_path):
     upgrade_version = ""
     source = ""
     rest_server_used = ""
+    neutron_custom_gov_notice = False  # Flag for Neutron specific message
 
     for rest_endpoint in healthy_rest_endpoints:  # Fix unpacking issue
         # Validate rest_endpoint format
@@ -728,37 +762,63 @@ def fetch_data_for_network(network, network_type, repo_path):
             continue
 
         current_endpoint = rest_endpoint["address"]
+        network_logger.debug(f"Trying REST endpoint: {current_endpoint}")
+
 
         if current_endpoint in SERVER_BLACKLIST:
+            network_logger.debug(f"Skipping blacklisted REST endpoint: {current_endpoint}")
             continue
 
         active_upgrade_check_failed = False
         upgrade_plan_check_failed = False
+        active_upgrade_name, active_upgrade_version, active_upgrade_height = None, None, None
+        current_upgrade_name, current_upgrade_version, current_upgrade_height, current_plan_dump = None, None, None, None
+
         try:
             if network in NETWORKS_NO_GOV_MODULE:
+                network_logger.debug("Network is in NETWORKS_NO_GOV_MODULE, skipping active proposal check.")
                 raise Exception("Network does not have gov module")
+            network_logger.debug(f"Fetching active upgrade proposals from {current_endpoint}")
             (
                 active_upgrade_name,
                 active_upgrade_version,
                 active_upgrade_height,
             ) = fetch_active_upgrade_proposals(current_endpoint, network, network_repo_url)
+            network_logger.debug(
+                "Active upgrade proposal result",
+                name=active_upgrade_name,
+                version=active_upgrade_version,
+                height=active_upgrade_height,
+            )
 
         except Exception as e:
+            network_logger.debug(f"Attempt to fetch active upgrade proposals from {current_endpoint} failed overall", entry_point_error=str(e))
             (
                 active_upgrade_name,
                 active_upgrade_version,
                 active_upgrade_height,
             ) = (None, None, None)
             active_upgrade_check_failed = True
+            if network == "neutron":  # Check if it's Neutron failing
+                neutron_custom_gov_notice = True
 
         try:
+            network_logger.debug(f"Fetching current upgrade plan from {current_endpoint}")
             (
                 current_upgrade_name,
                 current_upgrade_version,
                 current_upgrade_height,
                 current_plan_dump,
             ) = fetch_current_upgrade_plan(current_endpoint, network, network_repo_url)
-        except:
+            network_logger.debug(
+                "Current upgrade plan result",
+                name=current_upgrade_name,
+                version=current_upgrade_version,
+                height=current_upgrade_height,
+                plan_dump=current_plan_dump is not None,
+            )
+        except Exception as e:
+            network_logger.debug(f"Attempt to fetch current upgrade plan from {current_endpoint} failed overall", entry_point_error=str(e))
             (
                 current_upgrade_name,
                 current_upgrade_version,
@@ -766,45 +826,56 @@ def fetch_data_for_network(network, network_type, repo_path):
                 current_plan_dump,
             ) = (None, None, None, None)
             upgrade_plan_check_failed = True
+            if network == "neutron":  # Check if it's Neutron failing
+                neutron_custom_gov_notice = True
 
         if active_upgrade_check_failed and upgrade_plan_check_failed:
             network_logger.debug(
-                "Failed to query rest endpoints, trying next rest endpoint",
+                "Both active proposal and current plan checks failed, trying next rest endpoint",
                 current_endpoint=current_endpoint,
             )
             continue
 
         if active_upgrade_check_failed and network not in NETWORKS_NO_GOV_MODULE:
             network_logger.debug(
-                "Failed to query active upgrade endpoint, trying next rest endpoint",
+                "Failed to query active upgrade endpoint (and network has gov module), trying next rest endpoint",
                 current_endpoint=current_endpoint,
             )
             continue
+
+        # Decision logic logging
+        network_logger.debug("Evaluating upgrade results...")
+        network_logger.debug(f"Latest Block Height: {latest_block_height}")
+        network_logger.debug(f"Active Upgrade: Name={active_upgrade_name}, Version={active_upgrade_version}, Height={active_upgrade_height}")
+        network_logger.debug(f"Current Plan: Name={current_upgrade_name}, Version={current_upgrade_version}, Height={current_upgrade_height}")
 
         if (
             active_upgrade_version
             and (active_upgrade_height is not None)
             and active_upgrade_height > latest_block_height
         ):
+            network_logger.debug(f"Found valid active upgrade proposal: Height {active_upgrade_height} > {latest_block_height}")
             upgrade_block_height = active_upgrade_height
             upgrade_version = active_upgrade_version
             upgrade_name = active_upgrade_name
             source = "active_upgrade_proposals"
             rest_server_used = current_endpoint
+            neutron_custom_gov_notice = False  # Found via standard method
             break
-
-        if (
+        elif (
             current_upgrade_version
             and (current_upgrade_height is not None)
             and (current_plan_dump is not None)
             and current_upgrade_height > latest_block_height
         ):
+            network_logger.debug(f"Found valid current upgrade plan: Height {current_upgrade_height} > {latest_block_height}")
             upgrade_block_height = current_upgrade_height
             upgrade_plan = json.loads(current_plan_dump)
             upgrade_version = current_upgrade_version
             upgrade_name = current_upgrade_name
             source = "current_upgrade_plan"
             rest_server_used = current_endpoint
+            neutron_custom_gov_notice = False  # Found via standard method
             # Extract the relevant information from the parsed JSON
             info = {}
             binaries = []
@@ -829,41 +900,53 @@ def fetch_data_for_network(network, network_type, repo_path):
                 "upgraded_client_state": upgrade_plan.get("upgraded_client_state", None),
             }
             break
-
-        if not active_upgrade_version and not current_upgrade_version:
-            # this is where the "no upgrades found block runs"
+        else:
+            network_logger.debug("No valid future upgrade found from this endpoint.")
             rest_server_used = current_endpoint
-            break
+
+        if not active_upgrade_version and not current_upgrade_version and not active_upgrade_check_failed and not upgrade_plan_check_failed:
+             network_logger.debug("Successfully queried endpoint, but no upgrade proposal or plan found.")
+             rest_server_used = current_endpoint
+             break
+
+    # After the loop, if no upgrade was found and it's Neutron, log the notice
+    if neutron_custom_gov_notice and not upgrade_version:
+        network_logger.info("Standard gov/upgrade checks failed for Neutron. This network uses custom CosmWasm governance (neutron.gov) which is not currently checked by this script.")
 
     current_block_time = None
     past_block_time = None
+    network_logger.debug("Fetching block times...")
     for rpc_endpoint in healthy_rpc_endpoints:
         if not isinstance(rpc_endpoint, dict) or "address" not in rpc_endpoint:
             network_logger.info("Invalid rpc endpoint format for network", rpc_endpoint=rpc_endpoint)
             continue
 
-        current_endpoint = rpc_endpoint["address"]
-        current_block_time = get_block_time_rpc(current_endpoint, latest_block_height, network=network)
-        past_block_time = get_block_time_rpc(current_endpoint, latest_block_height - 10000, network=network)
+        network_logger.debug(f"Trying RPC endpoint for block times: {rpc_endpoint.get('address')}")
+        current_block_time = get_block_time_rpc(rpc_endpoint["address"], latest_block_height, network=network)
+        past_block_time = get_block_time_rpc(rpc_endpoint["address"], latest_block_height - 10000, network=network)
 
         if current_block_time and past_block_time:
+            network_logger.debug(f"Successfully fetched block times from {rpc_endpoint.get('address')}")
             break
         else:
-            network_logger.info(
-                "Failed to query current and past block time for rpc endpoint, trying next rpc endpoint",
-                current_endpoint=current_endpoint,
-            )
+            network_logger.debug(f"Failed to fetch block times from {rpc_endpoint.get('address')}")
             continue
 
     if not current_block_time or not past_block_time:
-        network_logger.error("Failed to fetch block times. Skipping network.")
-        return None  # Skip this network if block times cannot be fetched
+        network_logger.error("Failed to fetch block times from any healthy RPC endpoint. Skipping network.")
+        err_output_data["error"] = "Failed to fetch block times for estimation"
+        err_output_data["latest_block_height"] = latest_block_height
+        err_output_data["rpc_server"] = rpc_server_used
+        err_output_data["rest_server"] = rest_server_used
+        return err_output_data
 
     estimated_upgrade_time = None
     if upgrade_block_height is not None:
+        network_logger.debug("Estimating upgrade time...")
         estimated_upgrade_time = estimate_upgrade_time(current_block_time, past_block_time, latest_block_height, upgrade_block_height)
+        network_logger.debug(f"Estimated upgrade time: {estimated_upgrade_time}")
     else:
-        network_logger.debug(f"Upgrade block height is None for {network}. Skipping upgrade time estimation.")
+        network_logger.debug(f"Upgrade block height is None. Skipping upgrade time estimation.")
 
     output_data = {
         "network": network,
@@ -881,7 +964,7 @@ def fetch_data_for_network(network, network_type, repo_path):
         "logo_urls": logo_urls,
         "explorer_url": explorer_url,
     }
-    network_logger.debug("Completed fetch data for network")
+    network_logger.debug("Completed fetch data for network", final_data=output_data)
     return output_data
 
 
@@ -996,7 +1079,7 @@ def get_mainnet_data():
     sorted_results = sorted(results, key=lambda x: x["upgrade_found"], reverse=True)
     reordered_results = [
         {**reorder_data(result), "logo_urls": result.get("logo_urls"), "explorer_url": result.get("explorer_url")}
-        for result in sorted_results
+        for result in sorted_results if result
     ]
     return Response(
         json.dumps(reordered_results) + "\n", content_type="application/json"
@@ -1014,7 +1097,7 @@ def get_testnet_data():
     sorted_results = sorted(results, key=lambda x: x["upgrade_found"], reverse=True)
     reordered_results = [
         {**reorder_data(result), "logo_urls": result.get("logo_urls"), "explorer_url": result.get("explorer_url")}
-        for result in sorted_results
+        for result in sorted_results if result
     ]
     return Response(
         json.dumps(reordered_results) + "\n", content_type="application/json"
