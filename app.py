@@ -1120,10 +1120,12 @@ def update_data():
         try:
             repo_path = fetch_repo()
             global_logger.info("Repo path fetched", path=repo_path)
+            # Add a small sleep to yield control after repo fetch
+            sleep(0.1)
         except Exception as e:
             global_logger.error("Error downloading and extracting repo", error=str(e))
-            global_logger.info("Sleeping for 5 seconds before retrying...")
-            sleep(5)
+            global_logger.info(f"Sleeping for {UPDATE_INTERVAL_SECONDS} seconds before retrying...")
+            sleep(UPDATE_INTERVAL_SECONDS)
             continue
 
         try:
@@ -1185,6 +1187,8 @@ def update_data():
                  else: # Should not happen unless repo is empty/corrupt
                       global_logger.warning("No networks discovered in the repository.")
 
+            # Add another small sleep before starting the thread pool
+            sleep(0.1)
 
             with ThreadPoolExecutor() as executor:
                 testnet_data = list(
@@ -1219,7 +1223,7 @@ def update_data():
                 datetime.now() - start_time
             ).total_seconds()
             global_logger.info(
-                "Data update cycle completed. Sleeping for 1 minute...",
+                f"Data update cycle completed. Sleeping for {UPDATE_INTERVAL_SECONDS} seconds...",
                 elapsed_time=elapsed_time,
             )
             sleep(UPDATE_INTERVAL_SECONDS)
@@ -1228,7 +1232,7 @@ def update_data():
                 datetime.now() - start_time
             ).total_seconds()
             global_logger.exception("Error in update_data loop", elapsed_time=elapsed_time, error=str(e))
-            global_logger.info("Sleeping for 1 minute before retrying...")
+            global_logger.info(f"Sleeping for {UPDATE_INTERVAL_SECONDS} seconds before retrying...")
             sleep(UPDATE_INTERVAL_SECONDS)
 
 
