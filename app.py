@@ -103,7 +103,7 @@ SEMANTIC_VERSION_PATTERN = re.compile(r"(v\d+(?:\.\d+){0,2})")
 
 def get_chain_watch_env_var():
     chain_watch_str = os.environ.get("CHAIN_WATCH", "")
-    chain_watch_list = [chain.strip() for chain_watch_str.split(",") if chain.strip()]
+    chain_watch_list = [chain.strip() for chain in chain_watch_str.split(",") if chain.strip()]
 
     if len(chain_watch_list) > 0:
         logger.info(
@@ -1144,22 +1144,27 @@ def update_data():
             global_logger.debug(f"Discovered mainnet networks (pre-filter): {mainnet_networks_all}")
             global_logger.debug(f"Discovered testnet networks (pre-filter): {testnet_networks_all}")
 
+            # Filter out blacklisted networks first *before* CHAIN_WATCH filter
+            mainnet_networks_filtered = [net for net in mainnet_networks_all if net.upper() not in network_blacklist_set]
+            testnet_networks_filtered = [net for net in testnet_networks_all if net.upper() not in network_blacklist_set]
+
+            # Identify which networks were actually blacklisted from the original list
             blacklisted_mainnets = [net for net in mainnet_networks_all if net.upper() in network_blacklist_set]
             blacklisted_testnets = [net for net in testnet_networks_all if net.upper() in network_blacklist_set]
             all_blacklisted = blacklisted_mainnets + blacklisted_testnets
 
-            if all_blacklisted:
+            # Only log the blacklist info if CHAIN_WATCH is NOT set (meaning blacklist is the primary filter)
+            if not CHAIN_WATCH and all_blacklisted:
                 global_logger.info(f"Skipping blacklisted networks: {', '.join(sorted(all_blacklisted))}")
 
-            mainnet_networks_filtered = [net for net in mainnet_networks_all if net.upper() not in network_blacklist_set]
-            testnet_networks_filtered = [net for net in testnet_networks_all if net.upper() not in network_blacklist_set]
-
+            # Apply CHAIN_WATCH filter if applicable (to the already blacklist-filtered lists)
             mainnet_networks = mainnet_networks_filtered
             if len(CHAIN_WATCH) != 0:
                 chain_watch_lower = {c.lower() for c in CHAIN_WATCH}
                 mainnet_networks = [d for d in mainnet_networks_filtered if d.lower() in chain_watch_lower]
                 global_logger.debug(f"Filtered mainnet networks (post-blacklist, post-watch): {mainnet_networks}")
             else:
+                # Log here if CHAIN_WATCH is not set
                 global_logger.debug(f"Filtered mainnet networks (post-blacklist): {mainnet_networks}")
 
             testnet_networks = testnet_networks_filtered
@@ -1168,10 +1173,18 @@ def update_data():
                 testnet_networks = [d for d in testnet_networks_filtered if d.lower() in chain_watch_lower]
                 global_logger.debug(f"Filtered testnet networks (post-blacklist, post-watch): {testnet_networks}")
             else:
+                # Log here if CHAIN_WATCH is not set
                 global_logger.debug(f"Filtered testnet networks (post-blacklist): {testnet_networks}")
 
-            if not mainnet_networks and not testnet_networks and len(CHAIN_WATCH) > 0:
-                global_logger.warning("No matching networks found after filtering with CHAIN_WATCH and blacklist. Check CHAIN_WATCH/NETWORK_BLACKLIST values against directory names.")
+            if not mainnet_networks and not testnet_networks:
+                 # Refined warning message
+                 if len(CHAIN_WATCH) > 0:
+                     global_logger.warning("No matching networks found after filtering with CHAIN_WATCH and blacklist. Check CHAIN_WATCH/NETWORK_BLACKLIST values against directory names.")
+                 elif all_blacklisted: # If CHAIN_WATCH is empty, but blacklist removed everything
+                      global_logger.warning("All discovered networks were blacklisted.")
+                 else: # Should not happen unless repo is empty/corrupt
+                      global_logger.warning("No networks discovered in the repository.")
+
 
             with ThreadPoolExecutor() as executor:
                 testnet_data = list(
