@@ -858,7 +858,7 @@ def fetch_data_for_network(network, network_type, repo_path):
     }
 
     if not os.path.exists(chain_json_path):
-        network_logger.info("chain.json not found for network. Skipping...")
+        network_logger.error("chain.json not found for network. Skipping...")
         err_output_data[
             "error"
         ] = f"insufficient data in Cosmos chain registry, chain.json not found for {network}. Consider a PR to cosmos/chain-registry"
