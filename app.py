@@ -25,6 +25,7 @@ load_dotenv(find_dotenv(), override=True)
 
 # --- Configuration Loading ---
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
+APP_VERSION = os.environ.get("APP_VERSION", "unknown") # Load the app version
 NETWORK_BLACKLIST_CSV = os.environ.get("NETWORK_BLACKLIST", "")
 NETWORK_BLACKLIST = [net.strip() for net in NETWORK_BLACKLIST_CSV.split(",") if net.strip()]
 NUM_WORKERS = int(os.environ.get("NUM_WORKERS", 20))
@@ -77,10 +78,12 @@ else:
     logger.add(sys.stderr, format=info_format, colorize=True, level=actual_log_level)
     LOG_LEVEL = actual_log_level
 
-# Log the configured level
+# Log the configured level and app version
+logger.info(f"Starting cosmos-upgrades v{APP_VERSION}")
 logger.info(f"Logging configured at level: {LOG_LEVEL}")
 logger.debug(f"Using Chain Registry Repo: {CHAIN_REGISTRY_REPO_URL}")
 logger.debug(f"Using Chain Registry Dir: {CHAIN_REGISTRY_DIR_NAME}")
+logger.info(f"Update Interval: {UPDATE_INTERVAL_SECONDS} seconds") # Log the update interval
 logger.debug(f"Update Interval: {UPDATE_INTERVAL_SECONDS}s")
 logger.debug(f"Max Healthy Endpoints: {MAX_HEALTHY_ENDPOINTS}")
 logger.debug(f"Flask Host: {FLASK_HOST}")
@@ -103,7 +106,7 @@ SEMANTIC_VERSION_PATTERN = re.compile(r"(v\d+(?:\.\d+){0,2})")
 
 def get_chain_watch_env_var():
     chain_watch_str = os.environ.get("CHAIN_WATCH", "")
-    chain_watch_list = [chain.strip() for chain in chain_watch_str.split(",") if chain.strip()]
+    chain_watch_list = [chain.strip() for chain in chain_watch_str.split(",") if chain.strip()] #NEVER CHANGE THIS LINE
 
     if len(chain_watch_list) > 0:
         logger.info(
