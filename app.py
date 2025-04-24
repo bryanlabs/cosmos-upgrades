@@ -33,20 +33,23 @@ app = Flask(__name__)
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
 logger.remove()
 logger = logger.bind(network="GLOBAL")  # Ensure 'network' key is always present
-if LOG_LEVEL == "DEBUG":
-    logger.add(
-        sys.stderr,
-        format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <cyan>{extra[network]}</cyan> | <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>",
-        colorize=True,
-        level=LOG_LEVEL,
-    )
+
+# Define log formats
+debug_format = "<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <cyan>{extra[network]}</cyan> | <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>"
+info_format = "<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <cyan>{extra[network]}</cyan> - <level>{message}</level>"
+
+# Add handler based on LOG_LEVEL
+if LOG_LEVEL == "TRACE":
+    logger.add(sys.stderr, format=debug_format, colorize=True, level=LOG_LEVEL)
+elif LOG_LEVEL == "DEBUG":
+    logger.add(sys.stderr, format=debug_format, colorize=True, level=LOG_LEVEL)
 else:
-    logger.add(
-        sys.stderr,
-        format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <cyan>{extra[network]}</cyan> - <level>{message}</level>",
-        colorize=True,
-        level=LOG_LEVEL,
-    )
+    actual_log_level = "INFO"
+    logger.add(sys.stderr, format=info_format, colorize=True, level=actual_log_level)
+    LOG_LEVEL = actual_log_level
+
+# Log the configured level
+logger.info(f"Logging configured at level: {LOG_LEVEL}")
 
 # Suppress only the single InsecureRequestWarning from urllib3
 requests.packages.urllib3.disable_warnings(
@@ -95,19 +98,17 @@ PREFERRED_EXPLORERS = ["ping.pub", "mintscan.io", "nodes.guru"]
 
 def get_chain_watch_env_var():
     chain_watch_str = os.environ.get("CHAIN_WATCH", "")
-    # Split by comma and filter out any empty strings
-    # Corrected list comprehension: iterate over the split string
+    # Corrected list comprehension: move the 'if' condition to the end for filtering
     chain_watch_list = [chain.strip() for chain in chain_watch_str.split(",") if chain.strip()]
 
     if len(chain_watch_list) > 0:
-        # Include the list directly in the log message
         logger.info(
             f"CHAIN_WATCH env variable set. Watching: {', '.join(chain_watch_list)}",
         )
     else:
         logger.info("CHAIN_WATCH env variable not set, gathering data for all chains")
 
-    return chain_watch_list # Return the list
+    return chain_watch_list
 
 
 # Clone the repo
@@ -165,7 +166,6 @@ def is_rpc_endpoint_healthy(endpoint):
 def is_rest_endpoint_healthy(endpoint):
     try:
         response = requests.get(f"{endpoint}/health", timeout=1, verify=False)
-        # some chains dont implement the /health endpoint. Should we just skip /health and go directly to the below?
         if response.status_code != 200:
             response = requests.get(
                 f"{endpoint}/cosmos/base/tendermint/v1beta1/node_info",
@@ -189,9 +189,6 @@ def get_latest_block_height_rpc(rpc_url):
         return int(
             data.get("sync_info", {}).get("latest_block_height", 0)
         )
-
-    # RPC endpoints can return a 200 but not JSON (usually an HTML error page due to throttling or some other error)
-    # Catch everything instead of just requests.RequestException
     except Exception:
         return -1  # Return -1 to indicate an error
 
@@ -238,7 +235,6 @@ def estimate_upgrade_time(latest_block_time, past_block_time, latest_block_heigh
 
 def parse_isoformat_string(date_string):
     date_string = re.sub(r"(\.\d{6})\d+Z", r"\1Z", date_string)
-    # The microseconds MUST be 6 digits long
     if "." in date_string and len(date_string.split(".")[1]) != 7 and date_string.endswith("Z"):
         micros = date_string.split(".")[-1][:-1]
         date_string = date_string.replace(micros, micros.ljust(6, "0"))
@@ -296,7 +292,7 @@ def fetch_endpoints(network, base_url):
         return [], []
     
 def fetch_active_upgrade_proposals(rest_url, network, network_repo_url):
-    network_logger = logger.bind(network=network.upper())  # Bind the network name to the logger
+    network_logger = logger.bind(network=network.upper())
     try:
         [plan_name, version, height] = fetch_active_upgrade_proposals_v1(rest_url, network, network_repo_url)
     except RequiresGovV1Exception as e:
@@ -308,17 +304,15 @@ def fetch_active_upgrade_proposals(rest_url, network, network_repo_url):
 
 
 def fetch_active_upgrade_proposals_v1beta1(rest_url, network, network_repo_url):
-    network_logger = logger.bind(network=network.upper())  # Add logger binding
+    network_logger = logger.bind(network=network.upper())
     try:
         response = requests.get(
             f"{rest_url}/cosmos/gov/v1beta1/proposals?proposal_status=2", verify=False
         )
 
-        # Handle 501 Server Error
         if response.status_code == 501:
             return None, None
 
-        # check if the endpoint requires v1 instead of v1beta1
         if response.status_code != 200:
             response_json = {}
             try:
@@ -340,15 +334,11 @@ def fetch_active_upgrade_proposals_v1beta1(rest_url, network, network_repo_url):
                 proposal_type
                 == '/cosmos.upgrade.v1beta1.MsgSoftwareUpgrade'
             ):
-                # Extract version from the plan name
                 plan = content.get("plan", {})
                 plan_name = plan.get("name", "")
 
-                # naive regex search on whole message dump
                 content_dump = json.dumps(content)
 
-                # we tried plan_name regex match only, but the plan_name does not always track the version string
-                # see Terra v5 upgrade which points to the v2.2.1 version tag
                 versions = SEMANTIC_VERSION_PATTERN.findall(content_dump)
                 if versions:
                     network_repo_semver_tags = get_network_repo_semver_tags(network, network_repo_url)
@@ -363,8 +353,8 @@ def fetch_active_upgrade_proposals_v1beta1(rest_url, network, network_repo_url):
         return None, None, None
     except requests.RequestException as e:
         status_code = e.response.status_code if e.response is not None else "N/A"
-        network_logger.error(
-            "RequestException received from server during v1beta1 proposal fetch",
+        network_logger.debug(
+            "RequestException during v1beta1 active proposal fetch",
             server=rest_url,
             status_code=status_code,
             error=str(e),
@@ -384,104 +374,197 @@ def fetch_active_upgrade_proposals_v1beta1(rest_url, network, network_repo_url):
         raise e
     
 def fetch_active_upgrade_proposals_v1(rest_url, network, network_repo_url):
-    network_logger = logger.bind(network=network.upper())  # Add logger binding
-    try:
-        response = requests.get(
-            f"{rest_url}/cosmos/gov/v1/proposals?proposal_status=2", verify=False
-        )
+    network_logger = logger.bind(network=network.upper())
+    proposal_statuses_to_check = ["2", "3"] # Check Voting Period (2) then Passed (3)
 
-        # Handle 501 Server Error
-        if response.status_code == 501:
-            return None, None
+    for status_code in proposal_statuses_to_check:
+        network_logger.trace(f"Querying for proposals with status {status_code}")
+        all_proposals = []
+        next_key = None
 
-        response.raise_for_status()
-        data = response.json()
+        while True: # Loop for pagination
+            try:
+                query_params = {"proposal_status": status_code}
+                # Add pagination key if available
+                if next_key:
+                    query_params["pagination.key"] = next_key
 
-        for proposal in data.get("proposals", []):
+                response = requests.get(
+                    f"{rest_url}/cosmos/gov/v1/proposals", params=query_params, verify=False
+                )
+
+                if response.status_code == 501:
+                    network_logger.trace(f"Gov v1 endpoint not implemented (501) for status {status_code}")
+                    # Break pagination loop for this status, proceed to next status if any
+                    all_proposals = [] # Ensure we don't process partial results from failed pagination
+                    break
+
+                response.raise_for_status()
+                data = response.json()
+                network_logger.trace(f"Raw active proposals v1 data (status {status_code}, page key: {next_key})", data=str(data)[:1000])
+
+                # Add proposals from the current page
+                page_proposals = data.get("proposals", [])
+                if page_proposals: # Only append if there are proposals on the page
+                    all_proposals.extend(page_proposals)
+
+                # Check for next page key
+                next_key = data.get("pagination", {}).get("next_key")
+                if not next_key:
+                    network_logger.trace(f"No more pages for status {status_code}")
+                    break # Exit pagination loop if no next key
+
+                network_logger.trace(f"Found next page key for status {status_code}: {next_key}")
+                sleep(0.2) # Small delay before fetching next page
+
+            except requests.RequestException as e:
+                status_code_http = e.response.status_code if e.response is not None else "N/A"
+                network_logger.warning( # Use warning for pagination errors
+                    f"RequestException during v1 active proposal fetch pagination (status {status_code})",
+                    server=rest_url,
+                    status_code=status_code_http,
+                    error=str(e),
+                )
+                all_proposals = [] # Discard potentially incomplete results on error
+                break # Exit pagination loop on error
+            except Exception as e:
+                network_logger.error(
+                    f"Unhandled error during v1 active proposal fetch pagination (status {status_code})",
+                    server=rest_url,
+                    error=str(e),
+                    error_type=type(e).__name__,
+                    trace=traceback.format_exc()
+                )
+                all_proposals = [] # Discard potentially incomplete results on error
+                break # Exit pagination loop on error
+
+        # Process all proposals gathered for the current status code
+        network_logger.trace(f"Processing {len(all_proposals)} proposals found for status {status_code}")
+        for proposal in all_proposals:
             messages = proposal.get("messages", [])
+            proposal_id = proposal.get("id", "N/A")
 
             for message in messages:
                 proposal_type = message.get("@type")
+                upgrade_content = None # Variable to hold the actual upgrade proposal content
+
+                # Check for direct upgrade message type
                 if (
-                    proposal_type
-                    == "/cosmos.upgrade.v1beta1.SoftwareUpgradeProposal" or
-                    proposal_type
-                    == '/cosmos.upgrade.v1beta1.MsgSoftwareUpgrade'
+                    proposal_type == "/cosmos.upgrade.v1beta1.SoftwareUpgradeProposal" or
+                    proposal_type == '/cosmos.upgrade.v1beta1.MsgSoftwareUpgrade'
                 ):
-                    # Extract version from the plan name
-                    plan = message.get("plan", {})
+                    network_logger.trace(f"Found direct upgrade message in proposal {proposal_id} (status {status_code})", message_data=message)
+                    upgrade_content = message # The message itself is the content
+
+                # Check for legacy wrapper message type
+                elif proposal_type == "/cosmos.gov.v1.MsgExecLegacyContent":
+                    network_logger.trace(f"Found MsgExecLegacyContent in proposal {proposal_id} (status {status_code}), checking nested content...")
+                    legacy_content = message.get("content")
+                    if legacy_content and legacy_content.get("@type") == "/cosmos.upgrade.v1beta1.SoftwareUpgradeProposal":
+                         network_logger.trace(f"Found nested SoftwareUpgradeProposal in proposal {proposal_id} (status {status_code})", message_data=legacy_content)
+                         upgrade_content = legacy_content # The nested content is what we need
+                    else:
+                         network_logger.trace(f"Nested content is not a SoftwareUpgradeProposal in proposal {proposal_id} (status {status_code})")
+
+                # If we found upgrade content (either direct or nested)
+                if upgrade_content:
+                    plan = upgrade_content.get("plan", {})
                     plan_name = plan.get("name", "")
 
-                    # naive regex search on whole message dump
-                    content_dump = json.dumps(message)
+                    # Use the upgrade_content (which might be the original message or the nested content) for version search
+                    content_dump = json.dumps(upgrade_content)
+                    network_logger.trace(f"Content dump for version search (prop {proposal_id}, status {status_code})", content=content_dump)
 
-                    # we tried plan_name regex match only, but the plan_name does not always track the version string
-                    # see Terra v5 upgrade which points to the v2.2.1 version tag
                     versions = SEMANTIC_VERSION_PATTERN.findall(content_dump)
+                    # Add plan_name itself as a potential version string if regex fails
+                    if not versions and plan_name:
+                         versions.extend(SEMANTIC_VERSION_PATTERN.findall(plan_name))
+
+                    network_logger.trace(f"Regex version matches found (prop {proposal_id}, status {status_code})", matches=versions)
+
+                    version = None
                     if versions:
+                        # Remove duplicates before processing
+                        unique_versions = list(set(versions))
+                        network_logger.trace(f"Unique version strings found: {unique_versions}")
                         network_repo_semver_tags = get_network_repo_semver_tags(network, network_repo_url)
-                        version = find_best_semver_for_versions(network, versions, network_repo_semver_tags)
+                        network_logger.trace(f"Repo tags for semver check (prop {proposal_id}, status {status_code})", tags=network_repo_semver_tags)
+                        version = find_best_semver_for_versions(network, unique_versions, network_repo_semver_tags)
+                        network_logger.trace(f"Best semver found (prop {proposal_id}, status {status_code})", best_version=version)
+                    else:
+                        network_logger.trace(f"No regex version matches in content dump or plan name (prop {proposal_id}, status {status_code})")
+
                     try:
                         height = int(plan.get("height", 0))
                     except ValueError:
                         height = 0
+                        network_logger.trace(f"Could not parse height from plan (prop {proposal_id}, status {status_code})", plan_height=plan.get("height"))
 
                     if version:
+                        # Return immediately if a valid version is found
+                        network_logger.trace(f"Returning valid upgrade found in proposal {proposal_id} (status {status_code})", name=plan_name, version=version, height=height)
                         return plan_name, version, height
-        return None, None, None
-    except requests.RequestException as e:
-        status_code = e.response.status_code if e.response is not None else "N/A"
-        network_logger.error(
-            "RequestException received from server during v1 proposal fetch",
-            server=rest_url,
-            status_code=status_code,
-            error=str(e),
-        )
-        raise e
-    except Exception as e:
-        network_logger.error(
-            "Unhandled error while requesting v1 active upgrade endpoint",
-            server=rest_url,
-            error=str(e),
-            error_type=type(e).__name__,
-            trace=traceback.format_exc()
-        )
-        raise e
+                    else:
+                        network_logger.trace(f"Version extraction failed for proposal {proposal_id} (status {status_code}), continuing search...")
+                # else: No relevant upgrade message type found in this message item, continue to next message
+
+        network_logger.trace(f"No suitable active upgrade proposal found after checking all {len(all_proposals)} proposals for status {status_code}")
+
+
+    network_logger.trace("No suitable active upgrade proposal found after checking all specified statuses")
+    return None, None, None
 
 def fetch_current_upgrade_plan(rest_url, network, network_repo_url):
-    network_logger = logger.bind(network=network.upper())  # Bind the network name to the logger
+    network_logger = logger.bind(network=network.upper())
     try:
         response = requests.get(
             f"{rest_url}/cosmos/upgrade/v1beta1/current_plan", verify=False
         )
         response.raise_for_status()
         data = response.json()
+        # Trace log for raw plan data
+        network_logger.trace("Raw current plan data", data=data)
 
         plan = data.get("plan", {})
         if plan:
             plan_name = plan.get("name", "")
+            network_logger.trace("Found plan in current_plan endpoint", plan_data=plan) # Log found plan
 
-            # Convert the plan to string and search for the version pattern
             plan_dump = json.dumps(plan)
+            network_logger.trace("Plan dump for version search", content=plan_dump) # Log content being searched
 
-            # Get all version matches
             version_matches = SEMANTIC_VERSION_PATTERN.findall(plan_dump)
+            network_logger.trace("Regex version matches found in plan", matches=version_matches) # Log regex matches
 
+            version = None # Initialize version
             if version_matches:
-                # Find the longest match
                 network_repo_semver_tags = get_network_repo_semver_tags(network, network_repo_url)
+                network_logger.trace("Repo tags for semver check (plan)", tags=network_repo_semver_tags) # Log tags used
                 version = find_best_semver_for_versions(network, version_matches, network_repo_semver_tags)
-                try:
-                    height = int(plan.get("height", 0))
-                except ValueError:
-                    height = 0
-                return plan_name, version, height, plan_dump
+                network_logger.trace("Best semver found (plan)", best_version=version) # Log best version found
+            else:
+                network_logger.trace("No regex version matches in plan dump")
+
+            try:
+                height = int(plan.get("height", 0))
+            except ValueError:
+                height = 0
+                network_logger.trace("Could not parse height from plan", plan_height=plan.get("height")) # Log height parsing issue
+
+            if version: # Return only if version was successfully determined
+                 network_logger.trace("Returning valid upgrade found in plan", name=plan_name, version=version, height=height) # Log successful return
+                 return plan_name, version, height, plan_dump
+            else:
+                 network_logger.trace("Version extraction failed for plan, returning None") # Log failure to find version
+
+        else:
+            network_logger.trace("No plan found in current_plan response") # Log if 'plan' key is missing or empty
 
         return None, None, None, None
     except requests.RequestException as e:
         status_code = e.response.status_code if e.response is not None else "N/A"
-        network_logger.error(
-            "RequestException received from server during current plan fetch",
+        network_logger.debug(
+            "RequestException during current plan fetch",
             server=rest_url,
             status_code=status_code,
             error=str(e),
@@ -497,7 +580,6 @@ def fetch_current_upgrade_plan(rest_url, network, network_repo_url):
         )
         raise e
 
-# Add pagination support for GitHub API
 def fetch_network_repo_tags(network, network_repo):
     if "github.com" in network_repo:
         try:
@@ -521,15 +603,12 @@ def get_network_repo_semver_tags(network, network_repo_url):
     cached_tags = cache.get(network_repo_url + "_tags")
     if not cached_tags:
         network_repo_tag_strings = fetch_network_repo_tags(network, network_repo_url)
-        #cache response from network repo url to reduce api calls to whatever service is hosting the repo
-        # Increase cache timeout to 1 hour (3600 seconds)
         cache.set(network_repo_url + "_tags", network_repo_tag_strings, timeout=3600)
     else:
         network_repo_tag_strings = cached_tags
 
     network_repo_semver_tags = []
     for tag in network_repo_tag_strings:
-        #only use semantic version tags
         try:
             if tag.startswith("v"):
                 version = semantic_version.Version(tag[1:])
@@ -546,7 +625,6 @@ def find_best_semver_for_versions(network, network_version_strings, network_repo
         return max(network_version_strings, key=len)
 
     try:
-        # find version matches in the repo tags
         possible_semvers = []
         for version_string in network_version_strings:
             if version_string.startswith("v"):
@@ -555,8 +633,6 @@ def find_best_semver_for_versions(network, network_version_strings, network_repo
             contains_minor_version = True
             contains_patch_version = True
 
-            # our regex captures version strings like "v1" without a minor or patch version, so we need to check for that
-            # are these conditions good enough or is it missing any cases?
             if "." not in version_string:
                 contains_minor_version = False
                 contains_patch_version = False
@@ -568,7 +644,6 @@ def find_best_semver_for_versions(network, network_version_strings, network_repo
             current_semver = semantic_version.Version(version_string)
 
             for semver_tag in network_repo_semver_tags:
-                # find matching tags based on what information we have
                 if semver_tag.major == current_semver.major:
                     if contains_minor_version:
                         if semver_tag.minor == current_semver.minor:
@@ -580,9 +655,7 @@ def find_best_semver_for_versions(network, network_version_strings, network_repo
                     else:
                         possible_semvers.append(semver_tag)
 
-        # currently just return the highest semver from the list of possible matches. This may be too naive
         if len(possible_semvers) != 0:
-            #sorting is built into the semantic version library
             possible_semvers.sort(reverse=True)
             semver = possible_semvers[0]
             return f"v{semver.major}.{semver.minor}.{semver.patch}"
@@ -593,16 +666,10 @@ def find_best_semver_for_versions(network, network_version_strings, network_repo
     return max(network_version_strings, key=len)
 
 def fetch_cosmwasm_upgrade_proposal(rest_url, contract_address, query_type, network_name, network_repo_url):
-    """
-    Fetches software upgrade proposals from a CosmWasm governance contract.
-    """
     network_logger = logger.bind(network=network_name.upper())
     network_logger.debug(f"Attempting CosmWasm query '{query_type}' for {network_name} gov contract {contract_address} at {rest_url}")
 
-    # --- Construct Query ---
-    # Adapt query based on query_type, assuming list_proposals for now
     if query_type == "list_proposals":
-         # Query last ~20 proposals, hoping active ones are recent. Add pagination if needed.
         query_msg = {"list_proposals": {"limit": 20}}
     else:
         network_logger.error(f"Unsupported CosmWasm query type: {query_type}")
@@ -613,22 +680,19 @@ def fetch_cosmwasm_upgrade_proposal(rest_url, contract_address, query_type, netw
     api_url = f"{rest_url}/cosmwasm/wasm/v1/contract/{contract_address}/smart/{query_msg_base64}"
 
     try:
-        response = requests.get(api_url, timeout=10, verify=False) # Increased timeout
+        response = requests.get(api_url, timeout=10, verify=False)
         response.raise_for_status()
         data = response.json()
 
         proposals_data = data.get("data", {}).get("proposals", [])
         network_logger.debug(f"Found {len(proposals_data)} proposals via CosmWasm query")
 
-        # Iterate proposals in reverse (newest first)
         for prop_container in reversed(proposals_data):
             proposal = prop_container.get("proposal", {})
             prop_id = prop_container.get("id")
             status = proposal.get("status", "unknown").lower()
 
-            # Only consider proposals that might be active or recently passed
-            # Adjust statuses based on the specific contract's state machine
-            if status not in ["open", "passed", "executed", "neutron.cron.Schedule"]: # Neutron might use Schedule status
+            if status not in ["open", "passed", "executed", "neutron.cron.Schedule"]:
                 network_logger.debug(f"Skipping proposal {prop_id} with status '{status}'")
                 continue
 
@@ -636,29 +700,23 @@ def fetch_cosmwasm_upgrade_proposal(rest_url, contract_address, query_type, netw
 
             msgs = proposal.get("msgs", [])
             for msg_container in msgs:
-                # Check for Stargate message first (more standard)
                 stargate_msg = msg_container.get("stargate")
                 if stargate_msg:
                     type_url = stargate_msg.get("type_url")
                     value_b64 = stargate_msg.get("value")
                     if type_url == "/cosmos.upgrade.v1beta1.MsgSoftwareUpgrade" and value_b64:
                         network_logger.debug(f"Found Stargate MsgSoftwareUpgrade in proposal {prop_id}")
-                        # Attempt to parse the base64 value
-                        # NOTE: Proper protobuf parsing is needed here for reliability.
-                        # Using a placeholder regex approach for now.
                         plan_name_approx, version_approx, height_approx = parse_stargate_msg_software_upgrade(value_b64)
 
                         if height_approx and height_approx > 0:
-                             # Use the approximate version found by regex
-                             version = version_approx # Or try to refine using find_best_semver_for_versions if needed
-                             if version:
-                                 network_logger.info(f"Found {network_name} upgrade via CosmWasm (Stargate): Name={plan_name_approx}, Version={version}, Height={height_approx}")
-                                 return plan_name_approx, version, height_approx
-                             else:
-                                 network_logger.warning(f"Could not determine version for Stargate upgrade in prop {prop_id}")
-                        continue # Move to next message if parsing failed
+                            version = version_approx
+                            if version:
+                                network_logger.info(f"Found {network_name} upgrade via CosmWasm (Stargate): Name={plan_name_approx}, Version={version}, Height={height_approx}")
+                                return plan_name_approx, version, height_approx
+                            else:
+                                network_logger.warning(f"Could not determine version for Stargate upgrade in prop {prop_id}")
+                        continue
 
-                # Placeholder: Check for Wasm Execute message (less standard for x/upgrade)
                 wasm_execute = msg_container.get("wasm", {}).get("execute", {})
                 if wasm_execute:
                     try:
@@ -667,14 +725,13 @@ def fetch_cosmwasm_upgrade_proposal(rest_url, contract_address, query_type, netw
                             inner_msg_json = base64.b64decode(inner_msg_b64).decode('utf-8')
                             inner_msg = json.loads(inner_msg_json)
 
-                            # Look for a specific pattern like 'schedule_upgrade'
                             schedule_upgrade = inner_msg.get("schedule_upgrade", {})
                             plan = schedule_upgrade.get("plan", {})
                             if plan:
                                 network_logger.debug(f"Found potential Wasm 'schedule_upgrade' in proposal {prop_id}", plan=plan)
                                 plan_name = plan.get("name")
                                 height_str = plan.get("height")
-                                info_str = plan.get("info", "") # Info might contain version
+                                info_str = plan.get("info", "")
 
                                 height = 0
                                 try:
@@ -694,7 +751,7 @@ def fetch_cosmwasm_upgrade_proposal(rest_url, contract_address, query_type, netw
                                     network_logger.info(f"Found {network_name} upgrade via CosmWasm (Wasm Execute): Name={plan_name}, Version={version}, Height={height}")
                                     return plan_name, version, height
                                 else:
-                                     network_logger.debug(f"Wasm plan found in {prop_id} but missing version or valid height", name=plan_name, version=version, height=height)
+                                    network_logger.debug(f"Wasm plan found in {prop_id} but missing version or valid height", name=plan_name, version=version, height=height)
 
                     except Exception as decode_err:
                         network_logger.debug(f"Error decoding/parsing Wasm execute msg for proposal {prop_id}", error=str(decode_err))
@@ -709,18 +766,17 @@ def fetch_cosmwasm_upgrade_proposal(rest_url, contract_address, query_type, netw
         if e.response is not None:
             status_code = e.response.status_code
             try:
-                # Try to get response text, but handle cases where it might not be text/JSON
                 response_text = e.response.text
             except Exception:
                 response_text = "(Could not decode response body)"
 
-        network_logger.error(
+        network_logger.debug(
             f"RequestException during {network_name} CosmWasm query",
             server=rest_url,
             contract=contract_address,
-            api_url=api_url, # Log the exact URL queried
+            api_url=api_url,
             status_code=status_code,
-            response_body=response_text[:500], # Log first 500 chars of response
+            response_body=response_text[:500],
             error=str(e),
         )
         return None, None, None
@@ -736,7 +792,7 @@ def parse_stargate_msg_software_upgrade(msg_value_base64):
     """Parses a base64 encoded MsgSoftwareUpgrade proto message."""
     try:
         decoded_bytes = base64.b64decode(msg_value_base64)
-        decoded_str = decoded_bytes.decode('latin-1')  # Use latin-1 to avoid decode errors
+        decoded_str = decoded_bytes.decode('latin-1')
         plan_match = re.search(r'plan.*name.*"(v[^"]+)".*height.*(\d+)', decoded_str, re.IGNORECASE | re.DOTALL)
         if plan_match:
             name_approx = plan_match.group(1)
@@ -749,7 +805,7 @@ def parse_stargate_msg_software_upgrade(msg_value_base64):
 
 
 def fetch_data_for_networks_wrapper(network, network_type, repo_path):
-    network_logger = logger.bind(network=network.upper())  # Bind the network name to the logger
+    network_logger = logger.bind(network=network.upper())
     try:
         return fetch_data_for_network(network, network_type, repo_path)
     except Exception as e:
@@ -771,12 +827,10 @@ def get_healthy_explorer(explorers):
             if preferred in explorer["url"] and is_explorer_healthy(explorer["url"]):
                 return explorer
 
-    # If no preferred explorer is healthy, return the first healthy one
     for explorer in explorers:
         if is_explorer_healthy(explorer["url"]):
             return explorer
 
-    # If no explorers are healthy, return None
     return None
 
 def fetch_logo_urls(data):
@@ -792,22 +846,20 @@ def fetch_explorer_urls(data):
     explorers = data.get("explorers", [])
     healthy_explorer = get_healthy_explorer(explorers)
     if healthy_explorer:
-        # Remove tx_page and account_page if they exist
         healthy_explorer.pop("tx_page", None)
         healthy_explorer.pop("account_page", None)
     return healthy_explorer
 
 def fetch_data_for_network(network, network_type, repo_path):
     """Fetch data for a given network."""
-    network_logger = logger.bind(network=network.upper())  # Bind the network name to the logger
-    network_logger.debug("Starting data fetch for network")
+    network_logger = logger.bind(network=network.upper())
+    network_logger.trace("Starting data fetch for network")
 
-    # Skip networks in the blacklist
     if network.upper() in NETWORK_BLACKLIST:
-        network_logger.debug("Network is in the blacklist. Skipping...")
-        return None  # Return None to indicate no processing for blacklisted networks
+        # Change log level from debug to info
+        network_logger.info("Network is in the blacklist. Skipping...")
+        return None
 
-    # Construct the path to the chain.json file based on network type
     if network_type == "mainnet":
         chain_json_path = os.path.join(repo_path, network, "chain.json")
     elif network_type == "testnet":
@@ -822,7 +874,6 @@ def fetch_data_for_network(network, network_type, repo_path):
         "upgrade_found": False,
     }
 
-    # Check if the chain.json file exists
     if not os.path.exists(chain_json_path):
         network_logger.info("chain.json not found for network. Skipping...")
         err_output_data[
@@ -830,66 +881,64 @@ def fetch_data_for_network(network, network_type, repo_path):
         ] = f"insufficient data in Cosmos chain registry, chain.json not found for {network}. Consider a PR to cosmos/chain-registry"
         return err_output_data
 
-    # Load the chain.json data
     with open(chain_json_path, "r") as file:
         data = json.load(file)
-    network_logger.debug("Loaded chain.json data")
+    network_logger.trace("Loaded chain.json data")
 
     network_repo_url = data.get("codebase", {}).get("git_repo", None)
-    network_logger.debug("Network repo URL", url=network_repo_url)
+    network_logger.trace("Network repo URL", url=network_repo_url)
 
     rest_endpoints = data.get("apis", {}).get("rest", [])
     rpc_endpoints = data.get("apis", {}).get("rpc", [])
 
-    # Fetch logo URLs
     logo_urls = fetch_logo_urls(data)
-    network_logger.debug("Fetched logo URLs", urls=logo_urls)
+    network_logger.trace("Fetched logo URLs", urls=logo_urls)
 
-    # Fetch explorer URLs
     explorer_url = fetch_explorer_urls(data)
-    network_logger.debug("Fetched explorer URL", url=explorer_url)
+    network_logger.trace("Fetched explorer URL", url=explorer_url)
 
-    # Prioritize RPC endpoints for fetching the latest block height
     latest_block_height = -1
     healthy_rpc_endpoints = get_healthy_rpc_endpoints(rpc_endpoints)
     healthy_rest_endpoints = get_healthy_rest_endpoints(rest_endpoints)
     network_logger.debug(f"Found {len(healthy_rpc_endpoints)} healthy RPC endpoints and {len(healthy_rest_endpoints)} healthy REST endpoints")
+    # Log the specific healthy RPC endpoints found
+    healthy_rpc_addresses = [ep.get("address") for ep in healthy_rpc_endpoints if isinstance(ep, dict) and "address" in ep]
+    network_logger.debug(f"Healthy RPC endpoints selected: {healthy_rpc_addresses}")
 
 
     if len(healthy_rpc_endpoints) == 0:
         network_logger.error(
-            "No healthy RPC endpoints found for network while searching through endpoints. Skipping...",
-            rpc_endpoints=len(rpc_endpoints),
+            "No healthy RPC endpoints found. Skipping...",
+            rpc_endpoints_total=len(rpc_endpoints),
         )
         err_output_data[
             "error"
         ] = f"insufficient data in Cosmos chain registry, no healthy RPC servers for {network}. Consider a PR to cosmos/chain-registry"
         return err_output_data
 
-    # Shuffle the healthy endpoints
     shuffle(healthy_rpc_endpoints)
     shuffle(healthy_rest_endpoints)
 
     rpc_server_used = ""
     for rpc_endpoint in healthy_rpc_endpoints:
         if not isinstance(rpc_endpoint, dict) or "address" not in rpc_endpoint:
-            network_logger.debug("Invalid rpc endpoint format for network", rpc_endpoint=rpc_endpoint)
+            network_logger.debug("Invalid rpc endpoint format", rpc_endpoint=rpc_endpoint)
             continue
 
-        network_logger.debug(f"Trying RPC endpoint: {rpc_endpoint.get('address')}")
+        network_logger.trace(f"Trying RPC endpoint for latest height: {rpc_endpoint.get('address')}")
         latest_block_height = get_latest_block_height_rpc(rpc_endpoint["address"])
         if latest_block_height > 0:
             rpc_server_used = rpc_endpoint["address"]
             network_logger.debug(f"Successfully fetched latest block height {latest_block_height} from {rpc_server_used}")
             break
         else:
-            network_logger.debug(f"Failed to fetch latest block height from {rpc_endpoint.get('address')}")
+            network_logger.trace(f"Failed to fetch latest block height from {rpc_endpoint.get('address')}")
 
 
     if latest_block_height < 0:
         network_logger.error(
-            "No RPC endpoints returned latest height for network while searching through endpoints. Skipping...",
-            rpc_endpoints=len(rpc_endpoints),
+            "No RPC endpoints returned latest height. Skipping...",
+            rpc_endpoints_healthy=len(healthy_rpc_endpoints),
         )
         err_output_data[
             "error"
@@ -898,8 +947,8 @@ def fetch_data_for_network(network, network_type, repo_path):
 
     if len(healthy_rest_endpoints) == 0:
         network_logger.error(
-            "No healthy REST endpoints found for network while searching through endpoints. Skipping...",
-            rest_endpoints=len(rest_endpoints),
+            "No healthy REST endpoints found. Skipping...",
+            rest_endpoints_total=len(rest_endpoints),
         )
         err_output_data[
             "error"
@@ -908,29 +957,28 @@ def fetch_data_for_network(network, network_type, repo_path):
         err_output_data["rpc_server"] = rpc_server_used
         return err_output_data
 
-    network_logger.debug(
-        "Found rest endpoints and rpc endpoints for network",
-        rest_endpoints=len(healthy_rest_endpoints),
-        rpc_endpoints=len(healthy_rpc_endpoints),
+    network_logger.trace(
+        "Proceeding with checks",
+        rest_endpoints_count=len(healthy_rest_endpoints),
+        rpc_endpoints_count=len(healthy_rpc_endpoints),
     )
 
-    # Check for active upgrade proposals
     upgrade_block_height = None
     upgrade_name = ""
     upgrade_version = ""
     source = ""
     rest_server_used = ""
-    output_data = {}  # Initialize output_data here
+    output_data = {}
 
     for rest_endpoint in healthy_rest_endpoints:
         current_endpoint = rest_endpoint["address"]
-        network_logger.debug(f"Trying REST endpoint: {current_endpoint}")
+        network_logger.trace(f"Attempting checks using REST endpoint: {current_endpoint}")
 
         if current_endpoint in SERVER_BLACKLIST:
             network_logger.debug(f"Skipping blacklisted REST endpoint: {current_endpoint}")
             continue
 
-        # Reset results for this endpoint
+        # Initialize results for this endpoint iteration
         active_upgrade_name, active_upgrade_version, active_upgrade_height = None, None, None
         current_upgrade_name, current_upgrade_version, current_upgrade_height, current_plan_dump = None, None, None, None
         cosmwasm_upgrade_name, cosmwasm_upgrade_version, cosmwasm_upgrade_height = None, None, None
@@ -939,28 +987,42 @@ def fetch_data_for_network(network, network_type, repo_path):
         # 1. Try standard active proposals (if applicable)
         if network not in NETWORKS_NO_GOV_MODULE:
             try:
-                network_logger.debug(f"Fetching standard active upgrade proposals from {current_endpoint}")
+                network_logger.debug(f"Checking standard active proposals on {current_endpoint}")
                 (
                     active_upgrade_name, active_upgrade_version, active_upgrade_height
                 ) = fetch_active_upgrade_proposals(current_endpoint, network, network_repo_url)
-                network_logger.debug("Standard active proposal result", name=active_upgrade_name, version=active_upgrade_version, height=active_upgrade_height)
+                # Log the actual results at TRACE level
+                network_logger.trace(
+                    "Standard active proposal result",
+                    name=active_upgrade_name,
+                    version=active_upgrade_version,
+                    height=active_upgrade_height
+                )
             except Exception as e:
-                network_logger.debug(f"Standard active proposal check failed for {current_endpoint}", error=str(e))
+                network_logger.debug(f"Standard active proposal check failed on {current_endpoint}", error=str(e))
 
-        # 2. Try standard current plan
-        try:
-            network_logger.debug(f"Fetching standard current upgrade plan from {current_endpoint}")
-            (
-                current_upgrade_name, current_upgrade_version, current_upgrade_height, current_plan_dump
-            ) = fetch_current_upgrade_plan(current_endpoint, network, network_repo_url)
-            network_logger.debug("Standard current plan result", name=current_upgrade_name, version=current_upgrade_version, height=current_upgrade_height)
-        except Exception as e:
-            network_logger.debug(f"Standard current plan check failed for {current_endpoint}", error=str(e))
+        # 2. Try standard current plan (only if active proposal didn't yield results yet)
+        if not active_upgrade_version:
+            try:
+                network_logger.debug(f"Checking standard current plan on {current_endpoint}")
+                (
+                    current_upgrade_name, current_upgrade_version, current_upgrade_height, current_plan_dump
+                ) = fetch_current_upgrade_plan(current_endpoint, network, network_repo_url)
+                # Log the actual results at TRACE level
+                network_logger.trace(
+                    "Standard current plan result",
+                    name=current_upgrade_name,
+                    version=current_upgrade_version,
+                    height=current_upgrade_height
+                )
+            except Exception as e:
+                network_logger.debug(f"Standard current plan check failed on {current_endpoint}", error=str(e))
 
-        # 3. Try CosmWasm governance if configured
-        if network in COSMWASM_GOV_CONFIG:
+        # 3. Try CosmWasm governance if configured (only if others didn't yield results yet)
+        if not active_upgrade_version and not current_upgrade_version and network in COSMWASM_GOV_CONFIG:
             config = COSMWASM_GOV_CONFIG[network]
             try:
+                network_logger.debug(f"Checking CosmWasm proposals on {current_endpoint}")
                 (
                     cosmwasm_upgrade_name, cosmwasm_upgrade_version, cosmwasm_upgrade_height
                 ) = fetch_cosmwasm_upgrade_proposal(
@@ -970,112 +1032,86 @@ def fetch_data_for_network(network, network_type, repo_path):
                     network,
                     network_repo_url
                 )
-                # Logging is inside the function
+                # Log the actual results at TRACE level
+                network_logger.trace(
+                    "CosmWasm proposal result",
+                    name=cosmwasm_upgrade_name,
+                    version=cosmwasm_upgrade_version,
+                    height=cosmwasm_upgrade_height
+                )
             except Exception as e:
-                 network_logger.error(f"CosmWasm check failed unexpectedly for {current_endpoint}", error=str(e))
+                network_logger.warning(f"CosmWasm check failed unexpectedly on {current_endpoint}", error=str(e))
 
-        # 4. Evaluate results (Prioritize standard, then CosmWasm)
-        network_logger.debug("Evaluating upgrade results for endpoint...")
-        # ... (Log details of each result type) ...
+        # 4. Evaluate results
+        network_logger.trace("Evaluating upgrade results for endpoint...")
 
-        # Check standard active proposal first
         if active_upgrade_version and active_upgrade_height and active_upgrade_height > latest_block_height:
-            network_logger.debug(f"Using valid standard active upgrade proposal: Height {active_upgrade_height} > {latest_block_height}")
+            network_logger.trace(f"Using valid standard active upgrade proposal from {current_endpoint}: Height {active_upgrade_height} > {latest_block_height}")
             upgrade_block_height = active_upgrade_height
             upgrade_version = active_upgrade_version
             upgrade_name = active_upgrade_name
             source = "active_upgrade_proposals"
             found_upgrade_on_endpoint = True
-        # Else check standard current plan
         elif current_upgrade_version and current_upgrade_height and current_plan_dump and current_upgrade_height > latest_block_height:
-            network_logger.debug(f"Using valid standard current upgrade plan: Height {current_upgrade_height} > {latest_block_height}")
+            network_logger.trace(f"Using valid standard current upgrade plan from {current_endpoint}: Height {current_upgrade_height} > {latest_block_height}")
             upgrade_block_height = current_upgrade_height
-            upgrade_plan_data = json.loads(current_plan_dump)  # Renamed variable
             upgrade_version = current_upgrade_version
             upgrade_name = current_upgrade_name
+            output_data["upgrade_plan"] = current_plan_dump
             source = "current_upgrade_plan"
-            # Extract plan details
-            info = {}
-            binaries = []
-            plan_height = -1
-            try:
-                info = json.loads(upgrade_plan_data.get("info", "{}"))
-                binaries = info.get("binaries", {})
-                plan_height = int(upgrade_plan_data.get("height", -1))
-            except Exception as parse_err:
-                network_logger.debug("Failed to parse plan details. Non-fatal.", error=str(parse_err))
-                plan_height = -1  # Reset height if parsing failed
-
-            output_data["upgrade_plan"] = {
-                "height": plan_height if plan_height != -1 else None,
-                "binaries": binaries,
-                "name": upgrade_plan_data.get("name", None),
-                "upgraded_client_state": upgrade_plan_data.get("upgraded_client_state", None),
-            }
             found_upgrade_on_endpoint = True
-        # Else check CosmWasm result
         elif cosmwasm_upgrade_version and cosmwasm_upgrade_height and cosmwasm_upgrade_height > latest_block_height:
-            network_logger.debug(f"Using valid CosmWasm upgrade proposal: Height {cosmwasm_upgrade_height} > {latest_block_height}")
+            network_logger.trace(f"Using valid CosmWasm upgrade proposal from {current_endpoint}: Height {cosmwasm_upgrade_height} > {latest_block_height}")
             upgrade_block_height = cosmwasm_upgrade_height
             upgrade_version = cosmwasm_upgrade_version
             upgrade_name = cosmwasm_upgrade_name
             source = "cosmwasm_governance"
-            # Note: We don't have the full 'plan' details easily from this method currently
-            output_data["upgrade_plan"] = None  # Clear any plan from previous loops/endpoints
             found_upgrade_on_endpoint = True
 
-        # If any upgrade found on this endpoint, break the loop
         if found_upgrade_on_endpoint:
             rest_server_used = current_endpoint
-            network_logger.info(f"Upgrade found for {network} via {source} on endpoint {current_endpoint}. Breaking endpoint loop.")
-            break # Exit the loop over REST endpoints
+            network_logger.info(f"Upgrade found for {network} via {source} on endpoint {rest_server_used}",
+                                name=upgrade_name, version=upgrade_version, height=upgrade_block_height)
+            break
         else:
-            network_logger.debug(f"No valid future upgrade found using endpoint {current_endpoint}. Continuing to next endpoint if available.")
-            # Keep track of the last endpoint tried, in case none find an upgrade
-            rest_server_used = current_endpoint # Update last tried endpoint
+            network_logger.trace(f"No valid future upgrade found using endpoint {current_endpoint}. Trying next if available.")
+            rest_server_used = current_endpoint
 
-    # --- Post-Loop Processing ---
-    if not upgrade_version:  # Check if loop finished without finding an upgrade
-        network_logger.info(f"No future upgrade found for {network} after checking all healthy REST endpoints.")
-        # rest_server_used will hold the last endpoint checked
+    if not upgrade_version:
+        network_logger.info(f"No future upgrade found for {network} after checking all {len(healthy_rest_endpoints)} healthy REST endpoint(s).")
 
-    # Fetch block times (using healthy_rpc_endpoints)
     current_block_time = None
     past_block_time = None
     network_logger.debug("Fetching block times...")
     for rpc_endpoint in healthy_rpc_endpoints:
         if not isinstance(rpc_endpoint, dict) or "address" not in rpc_endpoint:
-            network_logger.info("Invalid rpc endpoint format for network", rpc_endpoint=rpc_endpoint)
+            network_logger.debug("Invalid rpc endpoint format for network", rpc_endpoint=rpc_endpoint)
             continue
 
-        network_logger.debug(f"Trying RPC endpoint for block times: {rpc_endpoint.get('address')}")
+        network_logger.trace(f"Trying RPC endpoint for block times: {rpc_endpoint.get('address')}")
         current_block_time = get_block_time_rpc(rpc_endpoint["address"], latest_block_height, network=network)
         past_block_time = get_block_time_rpc(rpc_endpoint["address"], latest_block_height - 10000, network=network)
 
         if current_block_time and past_block_time:
-            network_logger.debug(f"Successfully fetched block times from {rpc_endpoint.get('address')}")
+            network_logger.trace(f"Successfully fetched block times from {rpc_endpoint.get('address')}")
             break
         else:
-            network_logger.debug(f"Failed to fetch block times from {rpc_endpoint.get('address')}")
+            network_logger.trace(f"Failed to fetch block times from {rpc_endpoint.get('address')}")
             continue
 
     if not current_block_time or not past_block_time:
         network_logger.error("Failed to fetch block times from any healthy RPC endpoint. Skipping network.")
         err_output_data["error"] = "Failed to fetch block times for estimation"
-        err_output_data["latest_block_height"] = latest_block_height
-        err_output_data["rpc_server"] = rpc_server_used
-        err_output_data["rest_server"] = rest_server_used
         return err_output_data
 
     estimated_upgrade_time = None
     if upgrade_block_height is not None:
         network_logger.debug("Estimating upgrade time...")
         estimated_upgrade_time = estimate_upgrade_time(current_block_time, past_block_time, latest_block_height, upgrade_block_height)
-        network_logger.debug(f"Estimated upgrade time: {estimated_upgrade_time}")
+        network_logger.trace(f"Estimated upgrade time: {estimated_upgrade_time}")
     else:
-        network_logger.debug(f"Upgrade block height is None. Skipping upgrade time estimation.")
+        network_logger.trace(f"Upgrade block height is None. Skipping upgrade time estimation.")
 
-    # Construct final output_data dictionary (ensure upgrade_plan is included if found)
     final_output_data = {
         "network": network,
         "type": network_type,
@@ -1086,7 +1122,7 @@ def fetch_data_for_network(network, network_type, repo_path):
         "upgrade_name": upgrade_name,
         "source": source,
         "upgrade_block_height": upgrade_block_height,
-        "upgrade_plan": output_data.get("upgrade_plan", None),  # Get plan if set in loop
+        "upgrade_plan": output_data.get("upgrade_plan", None),
         "estimated_upgrade_time": estimated_upgrade_time,
         "version": upgrade_version,
         "logo_urls": logo_urls,
@@ -1098,16 +1134,14 @@ def fetch_data_for_network(network, network_type, repo_path):
 
 # periodic cache update
 def update_data():
-    """Function to periodically update the data for mainnets and testnets."""
-    global_logger = logger.bind(network="GLOBAL")  # Bind a default network context for global logs
-    global CHAIN_WATCH  # Declare usage of the global variable
+    global_logger = logger.bind(network="GLOBAL")
+    global CHAIN_WATCH
 
     while True:
-        start_time = datetime.now()  # Capture the start time
+        start_time = datetime.now()
         global_logger.info("Starting data update cycle...")
-        global_logger.debug(f"CHAIN_WATCH content in update_data: {CHAIN_WATCH}") # Log CHAIN_WATCH content in thread
+        global_logger.debug(f"CHAIN_WATCH content in update_data: {CHAIN_WATCH}")
 
-        # Git clone or fetch & pull
         try:
             repo_path = fetch_repo()
             global_logger.info("Repo path fetched", path=repo_path)
@@ -1118,38 +1152,36 @@ def update_data():
             continue
 
         try:
-            # Process mainnets & testnets
-            mainnet_networks_all = [ # Renamed to avoid immediate overwrite
+            mainnet_networks_all = [
                 d
                 for d in os.listdir(repo_path)
                 if os.path.isdir(os.path.join(repo_path, d))
                 and not d.startswith((".", "_"))
                 and d != "testnets"
             ]
-            global_logger.debug(f"Discovered mainnet networks (pre-filter): {mainnet_networks_all}") # Log discovered mainnets
+            global_logger.debug(f"Discovered mainnet networks (pre-filter): {mainnet_networks_all}")
 
-            mainnet_networks = mainnet_networks_all # Assign to original variable
-            if len(CHAIN_WATCH) != 0:  # Use the global variable
+            mainnet_networks = mainnet_networks_all
+            if len(CHAIN_WATCH) != 0:
                 chain_watch_lower = [c.lower() for c in CHAIN_WATCH]
                 mainnet_networks = [d for d in mainnet_networks_all if d.lower() in chain_watch_lower]
-                global_logger.debug(f"Filtered mainnet networks: {mainnet_networks}") # Log filtered mainnets
+                global_logger.debug(f"Filtered mainnet networks: {mainnet_networks}")
 
             testnet_path = os.path.join(repo_path, "testnets")
-            testnet_networks_all = [ # Renamed to avoid immediate overwrite
+            testnet_networks_all = [
                 d
                 for d in os.listdir(testnet_path)
                 if os.path.isdir(os.path.join(testnet_path, d))
                 and not d.startswith((".", "_"))
             ]
-            global_logger.debug(f"Discovered testnet networks (pre-filter): {testnet_networks_all}") # Log discovered testnets
+            global_logger.debug(f"Discovered testnet networks (pre-filter): {testnet_networks_all}")
 
-            testnet_networks = testnet_networks_all # Assign to original variable
-            if len(CHAIN_WATCH) != 0:  # Use the global variable
+            testnet_networks = testnet_networks_all
+            if len(CHAIN_WATCH) != 0:
                 chain_watch_lower = [c.lower() for c in CHAIN_WATCH]
                 testnet_networks = [d for d in testnet_networks_all if d.lower() in chain_watch_lower]
-                global_logger.debug(f"Filtered testnet networks: {testnet_networks}") # Log filtered testnets
+                global_logger.debug(f"Filtered testnet networks: {testnet_networks}")
 
-            # Check if lists are empty after filtering before proceeding
             if not mainnet_networks and not testnet_networks and len(CHAIN_WATCH) > 0:
                  global_logger.warning("No matching networks found after filtering with CHAIN_WATCH. Check CHAIN_WATCH values against directory names.")
 
@@ -1179,13 +1211,12 @@ def update_data():
                     )
                 )
 
-            # Update the Flask cache
             cache.set("MAINNET_DATA", mainnet_data)
             cache.set("TESTNET_DATA", testnet_data)
 
             elapsed_time = (
                 datetime.now() - start_time
-            ).total_seconds()  # Calculate the elapsed time
+            ).total_seconds()
             global_logger.info(
                 "Data update cycle completed. Sleeping for 1 minute...",
                 elapsed_time=elapsed_time,
@@ -1194,7 +1225,7 @@ def update_data():
         except Exception as e:
             elapsed_time = (
                 datetime.now() - start_time
-            ).total_seconds()  # Calculate the elapsed time in case of an error
+            ).total_seconds()
             global_logger.exception("Error in update_data loop", elapsed_time=elapsed_time, error=str(e))
             global_logger.info("Sleeping for 1 minute before retrying...")
             sleep(60)
@@ -1211,7 +1242,6 @@ def health_check():
     return jsonify(status="OK"), 200
 
 @app.route("/mainnets")
-# @cache.cached(timeout=600)  # Cache the result for 10 minutes
 def get_mainnet_data():
     results = cache.get("MAINNET_DATA")
     if results is None:
@@ -1229,7 +1259,6 @@ def get_mainnet_data():
 
 
 @app.route("/testnets")
-# @cache.cached(timeout=600)  # Cache the result for 10 minutes
 def get_testnet_data():
     results = cache.get("TESTNET_DATA")
     if results is None:
@@ -1266,11 +1295,9 @@ def get_chains():
 if __name__ == "__main__":
     class RequiresGovV1Exception(Exception):
         pass
-    # Set debug based on LOG_LEVEL env var
     app.debug = LOG_LEVEL == "DEBUG"
 
-    # Initialize CHAIN_WATCH here
-    CHAIN_WATCH = get_chain_watch_env_var()  # Read env var after load_dotenv() in main context
+    CHAIN_WATCH = get_chain_watch_env_var()
 
-    start_update_data_thread()  # Start thread after CHAIN_WATCH is set
+    start_update_data_thread()
     app.run(host="0.0.0.0", port=5001, use_reloader=False)
