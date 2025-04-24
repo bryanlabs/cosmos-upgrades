@@ -18,21 +18,50 @@ import logging
 import sys
 from loguru import logger
 from dotenv import load_dotenv, find_dotenv
-import base64  # Add base64 import
+import base64
 
 # Load environment variables from .env file explicitly
-# Find the .env file and override existing variables if necessary
 load_dotenv(find_dotenv(), override=True)
 
-# Load network blacklist from environment variable
-NETWORK_BLACKLIST = os.environ.get("NETWORK_BLACKLIST", "").split(",")
+# --- Configuration Loading ---
+LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
+NETWORK_BLACKLIST_CSV = os.environ.get("NETWORK_BLACKLIST", "")
+NETWORK_BLACKLIST = [net.strip() for net in NETWORK_BLACKLIST_CSV.split(",") if net.strip()]
+NUM_WORKERS = int(os.environ.get("NUM_WORKERS", 20))
+CHAIN_REGISTRY_REPO_URL = os.environ.get("CHAIN_REGISTRY_REPO_URL", "https://github.com/cosmos/chain-registry.git")
+CHAIN_REGISTRY_DIR_NAME = os.environ.get("CHAIN_REGISTRY_DIR_NAME", "chain-registry")
+GITHUB_API_URL = os.environ.get("GITHUB_API_URL", "https://api.github.com")
+SERVER_BLACKLIST_CSV = os.environ.get("SERVER_BLACKLIST", "https://stride.api.bccnodes.com:443,https://api.omniflix.nodestake.top,https://cosmos-lcd.quickapi.com:443,https://osmosis.rpc.stakin-nodes.com:443")
+SERVER_BLACKLIST = [srv.strip() for srv in SERVER_BLACKLIST_CSV.split(",") if srv.strip()]
+NETWORKS_NO_GOV_MODULE_CSV = os.environ.get("NETWORKS_NO_GOV_MODULE_CSV", "noble,nobletestnet")
+NETWORKS_NO_GOV_MODULE = [net.strip() for net in NETWORKS_NO_GOV_MODULE_CSV.split(",") if net.strip()]
+COSMWASM_GOV_CONFIG_JSON = os.environ.get("COSMWASM_GOV_CONFIG_JSON", '{"neutron": {"contract_address": "neutron1suhgf5svhu4usrurvxzlgn54ksxmn8gljarjtxqnapv8kjnp4nrs7d743d", "query_type": "list_proposals"}}')
+try:
+    COSMWASM_GOV_CONFIG = json.loads(COSMWASM_GOV_CONFIG_JSON)
+except json.JSONDecodeError:
+    logger.error("Failed to parse COSMWASM_GOV_CONFIG_JSON. Using empty config.", error=COSMWASM_GOV_CONFIG_JSON)
+    COSMWASM_GOV_CONFIG = {}
+PREFERRED_EXPLORERS_CSV = os.environ.get("PREFERRED_EXPLORERS_CSV", "ping.pub,mintscan.io,nodes.guru")
+PREFERRED_EXPLORERS = [exp.strip() for exp in PREFERRED_EXPLORERS_CSV.split(",") if exp.strip()]
+UPDATE_INTERVAL_SECONDS = int(os.environ.get("UPDATE_INTERVAL_SECONDS", 60))
+HEALTH_CHECK_TIMEOUT_SECONDS = int(os.environ.get("HEALTH_CHECK_TIMEOUT_SECONDS", 1))
+BLOCK_FETCH_TIMEOUT_SECONDS = int(os.environ.get("BLOCK_FETCH_TIMEOUT_SECONDS", 2))
+STATUS_TIMEOUT_SECONDS = int(os.environ.get("STATUS_TIMEOUT_SECONDS", 1)) # Timeout for /status endpoint
+COSMWASM_TIMEOUT_SECONDS = int(os.environ.get("COSMWASM_TIMEOUT_SECONDS", 10))
+MAX_HEALTHY_ENDPOINTS = int(os.environ.get("MAX_HEALTHY_ENDPOINTS", 5))
+BLOCK_RANGE_FOR_AVG_TIME = int(os.environ.get("BLOCK_RANGE_FOR_AVG_TIME", 10000))
+TAG_CACHE_TIMEOUT_SECONDS = int(os.environ.get("TAG_CACHE_TIMEOUT_SECONDS", 3600))
+FLASK_HOST = os.environ.get("FLASK_HOST", "0.0.0.0")
+FLASK_PORT = int(os.environ.get("FLASK_PORT", 5001))
+BLOCK_TIME_RETRIES = int(os.environ.get("BLOCK_TIME_RETRIES", 3))
+EXPLORER_HEALTH_TIMEOUT_SECONDS = int(os.environ.get("EXPLORER_HEALTH_TIMEOUT_SECONDS", 2))
+# --- End Configuration Loading ---
 
 app = Flask(__name__)
 
-# Set log level based on environment variable
-LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
+# Set log level based on environment variable (already loaded)
 logger.remove()
-logger = logger.bind(network="GLOBAL")  # Ensure 'network' key is always present
+logger = logger.bind(network="GLOBAL")
 
 # Define log formats
 debug_format = "<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <cyan>{extra[network]}</cyan> | <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>"
@@ -50,6 +79,12 @@ else:
 
 # Log the configured level
 logger.info(f"Logging configured at level: {LOG_LEVEL}")
+logger.debug(f"Using Chain Registry Repo: {CHAIN_REGISTRY_REPO_URL}")
+logger.debug(f"Using Chain Registry Dir: {CHAIN_REGISTRY_DIR_NAME}")
+logger.debug(f"Update Interval: {UPDATE_INTERVAL_SECONDS}s")
+logger.debug(f"Max Healthy Endpoints: {MAX_HEALTHY_ENDPOINTS}")
+logger.debug(f"Flask Host: {FLASK_HOST}")
+logger.debug(f"Flask Port: {FLASK_PORT}")
 
 # Suppress only the single InsecureRequestWarning from urllib3
 requests.packages.urllib3.disable_warnings(
@@ -59,47 +94,16 @@ requests.packages.urllib3.disable_warnings(
 # Initialize cache
 cache = Cache(app, config={"CACHE_TYPE": "simple"})
 
-# Initialize number of workers
-# Increase default workers, still configurable via env var
-num_workers = int(os.environ.get("NUM_WORKERS", 20))
-
-GITHUB_API_URL = "https://api.github.com"
-GITHUB_API_BASE_URL = GITHUB_API_URL + "/repos/cosmos/chain-registry/contents"
-
-# these servers have given consistent error responses, this list is used to skip them
-SERVER_BLACKLIST = [
-    "https://stride.api.bccnodes.com:443",
-    "https://api.omniflix.nodestake.top",
-    "https://cosmos-lcd.quickapi.com:443",
-    "https://osmosis.rpc.stakin-nodes.com:443",
-]
-
-NETWORKS_NO_GOV_MODULE = [
-    "noble",
-    "nobletestnet",
-]
-
-# Configuration for chains using CosmWasm Governance for upgrades
-COSMWASM_GOV_CONFIG = {
-    "neutron": {
-        "contract_address": "neutron1suhgf5svhu4usrurvxzlgn54ksxmn8gljarjtxqnapv8kjnp4nrs7d743d",  # Neutron DAO Core
-        "query_type": "list_proposals",  # Assumes a list_proposals query pattern
-    }
-}
-
 # Global variables to store the data for mainnets and testnets
 MAINNET_DATA = []
 TESTNET_DATA = []
-CHAIN_WATCH = []  # Initialize as empty list globally
+CHAIN_WATCH = []
 
 SEMANTIC_VERSION_PATTERN = re.compile(r"(v\d+(?:\.\d+){0,2})")
 
-PREFERRED_EXPLORERS = ["ping.pub", "mintscan.io", "nodes.guru"]
-
 def get_chain_watch_env_var():
     chain_watch_str = os.environ.get("CHAIN_WATCH", "")
-    # Corrected list comprehension: move the 'if' condition to the end for filtering
-    chain_watch_list = [chain.strip() for chain in chain_watch_str.split(",") if chain.strip()]
+    chain_watch_list = [chain.strip() for chain_watch_str.split(",") if chain.strip()]
 
     if len(chain_watch_list) > 0:
         logger.info(
@@ -114,8 +118,8 @@ def get_chain_watch_env_var():
 # Clone the repo
 def fetch_repo():
     """Clone or update the chain registry repository."""
-    repo_clone_url = "https://github.com/cosmos/chain-registry.git"
-    repo_dir = os.path.join(os.getcwd(), "chain-registry")
+    repo_clone_url = CHAIN_REGISTRY_REPO_URL
+    repo_dir = os.path.join(os.getcwd(), CHAIN_REGISTRY_DIR_NAME)
     try:
         if os.path.exists(repo_dir):
             subprocess.run(["git", "-C", repo_dir, "pull"], check=True)
@@ -128,7 +132,7 @@ def fetch_repo():
 
 
 def get_healthy_rpc_endpoints(rpc_endpoints):
-    with ThreadPoolExecutor(max_workers=num_workers) as executor:
+    with ThreadPoolExecutor(max_workers=NUM_WORKERS) as executor:
         healthy_rpc_endpoints = [
             rpc
             for rpc, is_healthy in executor.map(
@@ -137,11 +141,11 @@ def get_healthy_rpc_endpoints(rpc_endpoints):
             if is_healthy
         ]
 
-    return healthy_rpc_endpoints[:5]  # Select the first 5 healthy RPC endpoints
+    return healthy_rpc_endpoints[:MAX_HEALTHY_ENDPOINTS]
 
 
 def get_healthy_rest_endpoints(rest_endpoints):
-    with ThreadPoolExecutor(max_workers=num_workers) as executor:
+    with ThreadPoolExecutor(max_workers=NUM_WORKERS) as executor:
         healthy_rest_endpoints = [
             rest
             for rest, is_healthy in executor.map(
@@ -151,25 +155,25 @@ def get_healthy_rest_endpoints(rest_endpoints):
             if is_healthy
         ]
 
-    return healthy_rest_endpoints[:5]  # Select the first 5 healthy REST endpoints
+    return healthy_rest_endpoints[:MAX_HEALTHY_ENDPOINTS]
 
 
 def is_rpc_endpoint_healthy(endpoint):
     try:
-        response = requests.get(f"{endpoint}/abci_info", timeout=1, verify=False)
+        response = requests.get(f"{endpoint}/abci_info", timeout=HEALTH_CHECK_TIMEOUT_SECONDS, verify=False)
         if response.status_code != 200:
-            response = requests.get(f"{endpoint}/health", timeout=1, verify=False)
+            response = requests.get(f"{endpoint}/health", timeout=HEALTH_CHECK_TIMEOUT_SECONDS, verify=False)
         return response.status_code == 200
     except:
         return False
 
 def is_rest_endpoint_healthy(endpoint):
     try:
-        response = requests.get(f"{endpoint}/health", timeout=1, verify=False)
+        response = requests.get(f"{endpoint}/health", timeout=HEALTH_CHECK_TIMEOUT_SECONDS, verify=False)
         if response.status_code != 200:
             response = requests.get(
                 f"{endpoint}/cosmos/base/tendermint/v1beta1/node_info",
-                timeout=1,
+                timeout=HEALTH_CHECK_TIMEOUT_SECONDS,
                 verify=False,
             )
         return response.status_code == 200
@@ -179,7 +183,7 @@ def is_rest_endpoint_healthy(endpoint):
 def get_latest_block_height_rpc(rpc_url):
     """Fetch the latest block height from the RPC endpoint."""
     try:
-        response = requests.get(f"{rpc_url}/status", timeout=1)
+        response = requests.get(f"{rpc_url}/status", timeout=STATUS_TIMEOUT_SECONDS)
         response.raise_for_status()
         data = response.json()
 
@@ -190,43 +194,41 @@ def get_latest_block_height_rpc(rpc_url):
             data.get("sync_info", {}).get("latest_block_height", 0)
         )
     except Exception:
-        return -1  # Return -1 to indicate an error
+        return -1
 
 
-def get_block_time_rpc(rpc_url, height, retries=3, network=None):
+def get_block_time_rpc(rpc_url, height, retries=None, network=None):
     """Fetch the block header time for a given block height from the RPC endpoint."""
+    effective_retries = retries if retries is not None else BLOCK_TIME_RETRIES
     network_logger = logger.bind(network=network.upper() if network else "UNKNOWN")
-    for attempt in range(retries):
+    for attempt in range(effective_retries):
         try:
-            response = requests.get(f"{rpc_url}/block?height={height}", timeout=2)
+            response = requests.get(f"{rpc_url}/block?height={height}", timeout=BLOCK_FETCH_TIMEOUT_SECONDS)
             response.raise_for_status()
             data = response.json()
             if "result" in data.keys():
                 data = data["result"]
             return data.get("block", {}).get("header", {}).get("time", "")
         except requests.exceptions.HTTPError as e:
-            network_logger.error(f"HTTP error on attempt {attempt + 1}: {str(e)}")
-            if attempt == retries - 1:
-                return None  # Return None if all retries fail
+            network_logger.trace(f"HTTP error on attempt {attempt + 1}: {str(e)}")
+            if attempt == effective_retries - 1:
+                return None
         except Exception as e:
-            network_logger.error(f"Attempt {attempt + 1} failed: {str(e)}")
-            if attempt == retries - 1:
-                return None  # Return None if all retries fail
-        sleep(2 ** attempt)  # Exponential backoff
+            network_logger.trace(f"Attempt {attempt + 1} failed: {str(e)}")
+            if attempt == effective_retries - 1:
+                return None
+        sleep(2 ** attempt)
 
 def estimate_upgrade_time(latest_block_time, past_block_time, latest_block_height, upgrade_block_height):
     """Estimate the upgrade time based on block times and heights."""
     if not latest_block_time or not past_block_time or upgrade_block_height is None:
-        return None  # Return None if any required value is missing
+        return None
 
-    # Parse block times as UTC
     latest_block_datetime = parse_isoformat_string(latest_block_time)
     past_block_datetime = parse_isoformat_string(past_block_time)
 
-    # Calculate average block time
-    avg_block_time_seconds = (latest_block_datetime - past_block_datetime).total_seconds() / 10000
+    avg_block_time_seconds = (latest_block_datetime - past_block_datetime).total_seconds() / BLOCK_RANGE_FOR_AVG_TIME
 
-    # Estimate upgrade time
     blocks_until_upgrade = upgrade_block_height - latest_block_height
     estimated_seconds_until_upgrade = avg_block_time_seconds * blocks_until_upgrade
     estimated_upgrade_datetime = datetime.utcnow() + timedelta(seconds=estimated_seconds_until_upgrade)
@@ -353,7 +355,7 @@ def fetch_active_upgrade_proposals_v1beta1(rest_url, network, network_repo_url):
         return None, None, None
     except requests.RequestException as e:
         status_code = e.response.status_code if e.response is not None else "N/A"
-        network_logger.debug(
+        network_logger.trace(
             "RequestException during v1beta1 active proposal fetch",
             server=rest_url,
             status_code=status_code,
@@ -375,17 +377,16 @@ def fetch_active_upgrade_proposals_v1beta1(rest_url, network, network_repo_url):
     
 def fetch_active_upgrade_proposals_v1(rest_url, network, network_repo_url):
     network_logger = logger.bind(network=network.upper())
-    proposal_statuses_to_check = ["2", "3"] # Check Voting Period (2) then Passed (3)
+    proposal_statuses_to_check = ["2", "3"]
 
     for status_code in proposal_statuses_to_check:
         network_logger.trace(f"Querying for proposals with status {status_code}")
         all_proposals = []
         next_key = None
 
-        while True: # Loop for pagination
+        while True:
             try:
                 query_params = {"proposal_status": status_code}
-                # Add pagination key if available
                 if next_key:
                     query_params["pagination.key"] = next_key
 
@@ -395,38 +396,35 @@ def fetch_active_upgrade_proposals_v1(rest_url, network, network_repo_url):
 
                 if response.status_code == 501:
                     network_logger.trace(f"Gov v1 endpoint not implemented (501) for status {status_code}")
-                    # Break pagination loop for this status, proceed to next status if any
-                    all_proposals = [] # Ensure we don't process partial results from failed pagination
+                    all_proposals = []
                     break
 
                 response.raise_for_status()
                 data = response.json()
                 network_logger.trace(f"Raw active proposals v1 data (status {status_code}, page key: {next_key})", data=str(data)[:1000])
 
-                # Add proposals from the current page
                 page_proposals = data.get("proposals", [])
-                if page_proposals: # Only append if there are proposals on the page
+                if page_proposals:
                     all_proposals.extend(page_proposals)
 
-                # Check for next page key
                 next_key = data.get("pagination", {}).get("next_key")
                 if not next_key:
                     network_logger.trace(f"No more pages for status {status_code}")
-                    break # Exit pagination loop if no next key
+                    break
 
                 network_logger.trace(f"Found next page key for status {status_code}: {next_key}")
-                sleep(0.2) # Small delay before fetching next page
+                sleep(0.2)
 
             except requests.RequestException as e:
                 status_code_http = e.response.status_code if e.response is not None else "N/A"
-                network_logger.warning( # Use warning for pagination errors
+                network_logger.trace(
                     f"RequestException during v1 active proposal fetch pagination (status {status_code})",
                     server=rest_url,
                     status_code=status_code_http,
                     error=str(e),
                 )
-                all_proposals = [] # Discard potentially incomplete results on error
-                break # Exit pagination loop on error
+                all_proposals = []
+                break
             except Exception as e:
                 network_logger.error(
                     f"Unhandled error during v1 active proposal fetch pagination (status {status_code})",
@@ -435,10 +433,9 @@ def fetch_active_upgrade_proposals_v1(rest_url, network, network_repo_url):
                     error_type=type(e).__name__,
                     trace=traceback.format_exc()
                 )
-                all_proposals = [] # Discard potentially incomplete results on error
-                break # Exit pagination loop on error
+                all_proposals = []
+                break
 
-        # Process all proposals gathered for the current status code
         network_logger.trace(f"Processing {len(all_proposals)} proposals found for status {status_code}")
         for proposal in all_proposals:
             messages = proposal.get("messages", [])
@@ -446,37 +443,32 @@ def fetch_active_upgrade_proposals_v1(rest_url, network, network_repo_url):
 
             for message in messages:
                 proposal_type = message.get("@type")
-                upgrade_content = None # Variable to hold the actual upgrade proposal content
+                upgrade_content = None
 
-                # Check for direct upgrade message type
                 if (
                     proposal_type == "/cosmos.upgrade.v1beta1.SoftwareUpgradeProposal" or
                     proposal_type == '/cosmos.upgrade.v1beta1.MsgSoftwareUpgrade'
                 ):
                     network_logger.trace(f"Found direct upgrade message in proposal {proposal_id} (status {status_code})", message_data=message)
-                    upgrade_content = message # The message itself is the content
+                    upgrade_content = message
 
-                # Check for legacy wrapper message type
                 elif proposal_type == "/cosmos.gov.v1.MsgExecLegacyContent":
                     network_logger.trace(f"Found MsgExecLegacyContent in proposal {proposal_id} (status {status_code}), checking nested content...")
                     legacy_content = message.get("content")
                     if legacy_content and legacy_content.get("@type") == "/cosmos.upgrade.v1beta1.SoftwareUpgradeProposal":
                          network_logger.trace(f"Found nested SoftwareUpgradeProposal in proposal {proposal_id} (status {status_code})", message_data=legacy_content)
-                         upgrade_content = legacy_content # The nested content is what we need
+                         upgrade_content = legacy_content
                     else:
                          network_logger.trace(f"Nested content is not a SoftwareUpgradeProposal in proposal {proposal_id} (status {status_code})")
 
-                # If we found upgrade content (either direct or nested)
                 if upgrade_content:
                     plan = upgrade_content.get("plan", {})
                     plan_name = plan.get("name", "")
 
-                    # Use the upgrade_content (which might be the original message or the nested content) for version search
                     content_dump = json.dumps(upgrade_content)
                     network_logger.trace(f"Content dump for version search (prop {proposal_id}, status {status_code})", content=content_dump)
 
                     versions = SEMANTIC_VERSION_PATTERN.findall(content_dump)
-                    # Add plan_name itself as a potential version string if regex fails
                     if not versions and plan_name:
                          versions.extend(SEMANTIC_VERSION_PATTERN.findall(plan_name))
 
@@ -484,7 +476,6 @@ def fetch_active_upgrade_proposals_v1(rest_url, network, network_repo_url):
 
                     version = None
                     if versions:
-                        # Remove duplicates before processing
                         unique_versions = list(set(versions))
                         network_logger.trace(f"Unique version strings found: {unique_versions}")
                         network_repo_semver_tags = get_network_repo_semver_tags(network, network_repo_url)
@@ -501,12 +492,10 @@ def fetch_active_upgrade_proposals_v1(rest_url, network, network_repo_url):
                         network_logger.trace(f"Could not parse height from plan (prop {proposal_id}, status {status_code})", plan_height=plan.get("height"))
 
                     if version:
-                        # Return immediately if a valid version is found
                         network_logger.trace(f"Returning valid upgrade found in proposal {proposal_id} (status {status_code})", name=plan_name, version=version, height=height)
                         return plan_name, version, height
                     else:
                         network_logger.trace(f"Version extraction failed for proposal {proposal_id} (status {status_code}), continuing search...")
-                # else: No relevant upgrade message type found in this message item, continue to next message
 
         network_logger.trace(f"No suitable active upgrade proposal found after checking all {len(all_proposals)} proposals for status {status_code}")
 
@@ -522,26 +511,25 @@ def fetch_current_upgrade_plan(rest_url, network, network_repo_url):
         )
         response.raise_for_status()
         data = response.json()
-        # Trace log for raw plan data
         network_logger.trace("Raw current plan data", data=data)
 
         plan = data.get("plan", {})
         if plan:
             plan_name = plan.get("name", "")
-            network_logger.trace("Found plan in current_plan endpoint", plan_data=plan) # Log found plan
+            network_logger.trace("Found plan in current_plan endpoint", plan_data=plan)
 
             plan_dump = json.dumps(plan)
-            network_logger.trace("Plan dump for version search", content=plan_dump) # Log content being searched
+            network_logger.trace("Plan dump for version search", content=plan_dump)
 
             version_matches = SEMANTIC_VERSION_PATTERN.findall(plan_dump)
-            network_logger.trace("Regex version matches found in plan", matches=version_matches) # Log regex matches
+            network_logger.trace("Regex version matches found in plan", matches=version_matches)
 
-            version = None # Initialize version
+            version = None
             if version_matches:
                 network_repo_semver_tags = get_network_repo_semver_tags(network, network_repo_url)
-                network_logger.trace("Repo tags for semver check (plan)", tags=network_repo_semver_tags) # Log tags used
+                network_logger.trace("Repo tags for semver check (plan)", tags=network_repo_semver_tags)
                 version = find_best_semver_for_versions(network, version_matches, network_repo_semver_tags)
-                network_logger.trace("Best semver found (plan)", best_version=version) # Log best version found
+                network_logger.trace("Best semver found (plan)", best_version=version)
             else:
                 network_logger.trace("No regex version matches in plan dump")
 
@@ -549,21 +537,21 @@ def fetch_current_upgrade_plan(rest_url, network, network_repo_url):
                 height = int(plan.get("height", 0))
             except ValueError:
                 height = 0
-                network_logger.trace("Could not parse height from plan", plan_height=plan.get("height")) # Log height parsing issue
+                network_logger.trace("Could not parse height from plan", plan_height=plan.get("height"))
 
-            if version: # Return only if version was successfully determined
-                 network_logger.trace("Returning valid upgrade found in plan", name=plan_name, version=version, height=height) # Log successful return
+            if version:
+                 network_logger.trace("Returning valid upgrade found in plan", name=plan_name, version=version, height=height)
                  return plan_name, version, height, plan_dump
             else:
-                 network_logger.trace("Version extraction failed for plan, returning None") # Log failure to find version
+                 network_logger.trace("Version extraction failed for plan, returning None")
 
         else:
-            network_logger.trace("No plan found in current_plan response") # Log if 'plan' key is missing or empty
+            network_logger.trace("No plan found in current_plan response")
 
         return None, None, None, None
     except requests.RequestException as e:
         status_code = e.response.status_code if e.response is not None else "N/A"
-        network_logger.debug(
+        network_logger.trace(
             "RequestException during current plan fetch",
             server=rest_url,
             status_code=status_code,
@@ -595,7 +583,7 @@ def fetch_network_repo_tags(network, network_repo):
                 tags_url = response.links.get("next", {}).get("url")
             return [tag["name"] for tag in tags]
         except Exception as e:
-            logger.error("Error fetching tags", network=network, error=str(e))
+            logger.debug("Error fetching tags", network=network, error=str(e))
             return []
     return []
 
@@ -603,7 +591,7 @@ def get_network_repo_semver_tags(network, network_repo_url):
     cached_tags = cache.get(network_repo_url + "_tags")
     if not cached_tags:
         network_repo_tag_strings = fetch_network_repo_tags(network, network_repo_url)
-        cache.set(network_repo_url + "_tags", network_repo_tag_strings, timeout=3600)
+        cache.set(network_repo_url + "_tags", network_repo_tag_strings, timeout=TAG_CACHE_TIMEOUT_SECONDS)
     else:
         network_repo_tag_strings = cached_tags
 
@@ -680,7 +668,7 @@ def fetch_cosmwasm_upgrade_proposal(rest_url, contract_address, query_type, netw
     api_url = f"{rest_url}/cosmwasm/wasm/v1/contract/{contract_address}/smart/{query_msg_base64}"
 
     try:
-        response = requests.get(api_url, timeout=10, verify=False)
+        response = requests.get(api_url, timeout=COSMWASM_TIMEOUT_SECONDS, verify=False)
         response.raise_for_status()
         data = response.json()
 
@@ -770,7 +758,7 @@ def fetch_cosmwasm_upgrade_proposal(rest_url, contract_address, query_type, netw
             except Exception:
                 response_text = "(Could not decode response body)"
 
-        network_logger.debug(
+        network_logger.trace(
             f"RequestException during {network_name} CosmWasm query",
             server=rest_url,
             contract=contract_address,
@@ -815,7 +803,7 @@ def fetch_data_for_networks_wrapper(network, network_type, repo_path):
 def is_explorer_healthy(url):
     """Check if an explorer URL is healthy."""
     try:
-        response = requests.get(url, timeout=2)
+        response = requests.get(url, timeout=EXPLORER_HEALTH_TIMEOUT_SECONDS)
         return response.status_code == 200
     except:
         return False
@@ -854,11 +842,6 @@ def fetch_data_for_network(network, network_type, repo_path):
     """Fetch data for a given network."""
     network_logger = logger.bind(network=network.upper())
     network_logger.trace("Starting data fetch for network")
-
-    if network.upper() in NETWORK_BLACKLIST:
-        # Change log level from debug to info
-        network_logger.info("Network is in the blacklist. Skipping...")
-        return None
 
     if network_type == "mainnet":
         chain_json_path = os.path.join(repo_path, network, "chain.json")
@@ -901,7 +884,6 @@ def fetch_data_for_network(network, network_type, repo_path):
     healthy_rpc_endpoints = get_healthy_rpc_endpoints(rpc_endpoints)
     healthy_rest_endpoints = get_healthy_rest_endpoints(rest_endpoints)
     network_logger.debug(f"Found {len(healthy_rpc_endpoints)} healthy RPC endpoints and {len(healthy_rest_endpoints)} healthy REST endpoints")
-    # Log the specific healthy RPC endpoints found
     healthy_rpc_addresses = [ep.get("address") for ep in healthy_rpc_endpoints if isinstance(ep, dict) and "address" in ep]
     network_logger.debug(f"Healthy RPC endpoints selected: {healthy_rpc_addresses}")
 
@@ -978,20 +960,17 @@ def fetch_data_for_network(network, network_type, repo_path):
             network_logger.debug(f"Skipping blacklisted REST endpoint: {current_endpoint}")
             continue
 
-        # Initialize results for this endpoint iteration
         active_upgrade_name, active_upgrade_version, active_upgrade_height = None, None, None
         current_upgrade_name, current_upgrade_version, current_upgrade_height, current_plan_dump = None, None, None, None
         cosmwasm_upgrade_name, cosmwasm_upgrade_version, cosmwasm_upgrade_height = None, None, None
         found_upgrade_on_endpoint = False
 
-        # 1. Try standard active proposals (if applicable)
         if network not in NETWORKS_NO_GOV_MODULE:
             try:
                 network_logger.debug(f"Checking standard active proposals on {current_endpoint}")
                 (
                     active_upgrade_name, active_upgrade_version, active_upgrade_height
                 ) = fetch_active_upgrade_proposals(current_endpoint, network, network_repo_url)
-                # Log the actual results at TRACE level
                 network_logger.trace(
                     "Standard active proposal result",
                     name=active_upgrade_name,
@@ -999,16 +978,14 @@ def fetch_data_for_network(network, network_type, repo_path):
                     height=active_upgrade_height
                 )
             except Exception as e:
-                network_logger.debug(f"Standard active proposal check failed on {current_endpoint}", error=str(e))
+                network_logger.trace(f"Standard active proposal check failed on {current_endpoint}", error=str(e))
 
-        # 2. Try standard current plan (only if active proposal didn't yield results yet)
         if not active_upgrade_version:
             try:
                 network_logger.debug(f"Checking standard current plan on {current_endpoint}")
                 (
                     current_upgrade_name, current_upgrade_version, current_upgrade_height, current_plan_dump
                 ) = fetch_current_upgrade_plan(current_endpoint, network, network_repo_url)
-                # Log the actual results at TRACE level
                 network_logger.trace(
                     "Standard current plan result",
                     name=current_upgrade_name,
@@ -1016,9 +993,8 @@ def fetch_data_for_network(network, network_type, repo_path):
                     height=current_upgrade_height
                 )
             except Exception as e:
-                network_logger.debug(f"Standard current plan check failed on {current_endpoint}", error=str(e))
+                network_logger.trace(f"Standard current plan check failed on {current_endpoint}", error=str(e))
 
-        # 3. Try CosmWasm governance if configured (only if others didn't yield results yet)
         if not active_upgrade_version and not current_upgrade_version and network in COSMWASM_GOV_CONFIG:
             config = COSMWASM_GOV_CONFIG[network]
             try:
@@ -1032,7 +1008,6 @@ def fetch_data_for_network(network, network_type, repo_path):
                     network,
                     network_repo_url
                 )
-                # Log the actual results at TRACE level
                 network_logger.trace(
                     "CosmWasm proposal result",
                     name=cosmwasm_upgrade_name,
@@ -1040,9 +1015,8 @@ def fetch_data_for_network(network, network_type, repo_path):
                     height=cosmwasm_upgrade_height
                 )
             except Exception as e:
-                network_logger.warning(f"CosmWasm check failed unexpectedly on {current_endpoint}", error=str(e))
+                network_logger.trace(f"CosmWasm check failed unexpectedly on {current_endpoint}", error=str(e))
 
-        # 4. Evaluate results
         network_logger.trace("Evaluating upgrade results for endpoint...")
 
         if active_upgrade_version and active_upgrade_height and active_upgrade_height > latest_block_height:
@@ -1074,11 +1048,11 @@ def fetch_data_for_network(network, network_type, repo_path):
                                 name=upgrade_name, version=upgrade_version, height=upgrade_block_height)
             break
         else:
-            network_logger.trace(f"No valid future upgrade found using endpoint {current_endpoint}. Trying next if available.")
+            network_logger.trace(f"No valid upgrade found using endpoint {current_endpoint}. Trying next if available.")
             rest_server_used = current_endpoint
 
     if not upgrade_version:
-        network_logger.info(f"No future upgrade found for {network} after checking all {len(healthy_rest_endpoints)} healthy REST endpoint(s).")
+        network_logger.info(f"No upgrade found for {network} after checking all {len(healthy_rest_endpoints)} healthy REST endpoint(s).")
 
     current_block_time = None
     past_block_time = None
@@ -1090,7 +1064,7 @@ def fetch_data_for_network(network, network_type, repo_path):
 
         network_logger.trace(f"Trying RPC endpoint for block times: {rpc_endpoint.get('address')}")
         current_block_time = get_block_time_rpc(rpc_endpoint["address"], latest_block_height, network=network)
-        past_block_time = get_block_time_rpc(rpc_endpoint["address"], latest_block_height - 10000, network=network)
+        past_block_time = get_block_time_rpc(rpc_endpoint["address"], latest_block_height - BLOCK_RANGE_FOR_AVG_TIME, network=network)
 
         if current_block_time and past_block_time:
             network_logger.trace(f"Successfully fetched block times from {rpc_endpoint.get('address')}")
@@ -1136,6 +1110,7 @@ def fetch_data_for_network(network, network_type, repo_path):
 def update_data():
     global_logger = logger.bind(network="GLOBAL")
     global CHAIN_WATCH
+    network_blacklist_set = {net.strip().upper() for net in NETWORK_BLACKLIST if net.strip()}
 
     while True:
         start_time = datetime.now()
@@ -1159,14 +1134,6 @@ def update_data():
                 and not d.startswith((".", "_"))
                 and d != "testnets"
             ]
-            global_logger.debug(f"Discovered mainnet networks (pre-filter): {mainnet_networks_all}")
-
-            mainnet_networks = mainnet_networks_all
-            if len(CHAIN_WATCH) != 0:
-                chain_watch_lower = [c.lower() for c in CHAIN_WATCH]
-                mainnet_networks = [d for d in mainnet_networks_all if d.lower() in chain_watch_lower]
-                global_logger.debug(f"Filtered mainnet networks: {mainnet_networks}")
-
             testnet_path = os.path.join(repo_path, "testnets")
             testnet_networks_all = [
                 d
@@ -1174,16 +1141,37 @@ def update_data():
                 if os.path.isdir(os.path.join(testnet_path, d))
                 and not d.startswith((".", "_"))
             ]
+            global_logger.debug(f"Discovered mainnet networks (pre-filter): {mainnet_networks_all}")
             global_logger.debug(f"Discovered testnet networks (pre-filter): {testnet_networks_all}")
 
-            testnet_networks = testnet_networks_all
+            blacklisted_mainnets = [net for net in mainnet_networks_all if net.upper() in network_blacklist_set]
+            blacklisted_testnets = [net for net in testnet_networks_all if net.upper() in network_blacklist_set]
+            all_blacklisted = blacklisted_mainnets + blacklisted_testnets
+
+            if all_blacklisted:
+                global_logger.info(f"Skipping blacklisted networks: {', '.join(sorted(all_blacklisted))}")
+
+            mainnet_networks_filtered = [net for net in mainnet_networks_all if net.upper() not in network_blacklist_set]
+            testnet_networks_filtered = [net for net in testnet_networks_all if net.upper() not in network_blacklist_set]
+
+            mainnet_networks = mainnet_networks_filtered
             if len(CHAIN_WATCH) != 0:
-                chain_watch_lower = [c.lower() for c in CHAIN_WATCH]
-                testnet_networks = [d for d in testnet_networks_all if d.lower() in chain_watch_lower]
-                global_logger.debug(f"Filtered testnet networks: {testnet_networks}")
+                chain_watch_lower = {c.lower() for c in CHAIN_WATCH}
+                mainnet_networks = [d for d in mainnet_networks_filtered if d.lower() in chain_watch_lower]
+                global_logger.debug(f"Filtered mainnet networks (post-blacklist, post-watch): {mainnet_networks}")
+            else:
+                global_logger.debug(f"Filtered mainnet networks (post-blacklist): {mainnet_networks}")
+
+            testnet_networks = testnet_networks_filtered
+            if len(CHAIN_WATCH) != 0:
+                chain_watch_lower = {c.lower() for c in CHAIN_WATCH}
+                testnet_networks = [d for d in testnet_networks_filtered if d.lower() in chain_watch_lower]
+                global_logger.debug(f"Filtered testnet networks (post-blacklist, post-watch): {testnet_networks}")
+            else:
+                global_logger.debug(f"Filtered testnet networks (post-blacklist): {testnet_networks}")
 
             if not mainnet_networks and not testnet_networks and len(CHAIN_WATCH) > 0:
-                 global_logger.warning("No matching networks found after filtering with CHAIN_WATCH. Check CHAIN_WATCH values against directory names.")
+                global_logger.warning("No matching networks found after filtering with CHAIN_WATCH and blacklist. Check CHAIN_WATCH/NETWORK_BLACKLIST values against directory names.")
 
             with ThreadPoolExecutor() as executor:
                 testnet_data = list(
@@ -1221,14 +1209,14 @@ def update_data():
                 "Data update cycle completed. Sleeping for 1 minute...",
                 elapsed_time=elapsed_time,
             )
-            sleep(60)
+            sleep(UPDATE_INTERVAL_SECONDS)
         except Exception as e:
             elapsed_time = (
                 datetime.now() - start_time
             ).total_seconds()
             global_logger.exception("Error in update_data loop", elapsed_time=elapsed_time, error=str(e))
             global_logger.info("Sleeping for 1 minute before retrying...")
-            sleep(60)
+            sleep(UPDATE_INTERVAL_SECONDS)
 
 
 def start_update_data_thread():
@@ -1300,4 +1288,4 @@ if __name__ == "__main__":
     CHAIN_WATCH = get_chain_watch_env_var()
 
     start_update_data_thread()
-    app.run(host="0.0.0.0", port=5001, use_reloader=False)
+    app.run(host=FLASK_HOST, port=FLASK_PORT, use_reloader=False)
