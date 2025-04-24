@@ -17,11 +17,12 @@ import semantic_version
 import logging
 import sys
 from loguru import logger
-from dotenv import load_dotenv
+from dotenv import load_dotenv, find_dotenv
 import base64  # Add base64 import
 
-# Load environment variables from .env file
-load_dotenv()
+# Load environment variables from .env file explicitly
+# Find the .env file and override existing variables if necessary
+load_dotenv(find_dotenv(), override=True)
 
 # Load network blacklist from environment variable
 NETWORK_BLACKLIST = os.environ.get("NETWORK_BLACKLIST", "").split(",")
@@ -86,28 +87,27 @@ COSMWASM_GOV_CONFIG = {
 # Global variables to store the data for mainnets and testnets
 MAINNET_DATA = []
 TESTNET_DATA = []
+CHAIN_WATCH = []  # Initialize as empty list globally
 
 SEMANTIC_VERSION_PATTERN = re.compile(r"(v\d+(?:\.\d+){0,2})")
 
 PREFERRED_EXPLORERS = ["ping.pub", "mintscan.io", "nodes.guru"]
 
 def get_chain_watch_env_var():
-    chain_watch = os.environ.get("CHAIN_WATCH", "")
+    chain_watch_str = os.environ.get("CHAIN_WATCH", "")
+    # Split by comma and filter out any empty strings
+    # Corrected list comprehension: iterate over the split string
+    chain_watch_list = [chain.strip() for chain in chain_watch_str.split(",") if chain.strip()]
 
-    chain_watch.split(" ")
-
-    if len(chain_watch) > 0:
+    if len(chain_watch_list) > 0:
+        # Include the list directly in the log message
         logger.info(
-            "CHAIN_WATCH env variable set, gathering data and watching for these chains",
-            chains=chain_watch,
+            f"CHAIN_WATCH env variable set. Watching: {', '.join(chain_watch_list)}",
         )
     else:
         logger.info("CHAIN_WATCH env variable not set, gathering data for all chains")
 
-    return chain_watch
-
-
-CHAIN_WATCH = get_chain_watch_env_var()
+    return chain_watch_list # Return the list
 
 
 # Clone the repo
@@ -1100,10 +1100,12 @@ def fetch_data_for_network(network, network_type, repo_path):
 def update_data():
     """Function to periodically update the data for mainnets and testnets."""
     global_logger = logger.bind(network="GLOBAL")  # Bind a default network context for global logs
+    global CHAIN_WATCH  # Declare usage of the global variable
 
     while True:
         start_time = datetime.now()  # Capture the start time
         global_logger.info("Starting data update cycle...")
+        global_logger.debug(f"CHAIN_WATCH content in update_data: {CHAIN_WATCH}") # Log CHAIN_WATCH content in thread
 
         # Git clone or fetch & pull
         try:
@@ -1117,27 +1119,39 @@ def update_data():
 
         try:
             # Process mainnets & testnets
-            mainnet_networks = [
+            mainnet_networks_all = [ # Renamed to avoid immediate overwrite
                 d
                 for d in os.listdir(repo_path)
                 if os.path.isdir(os.path.join(repo_path, d))
                 and not d.startswith((".", "_"))
                 and d != "testnets"
             ]
+            global_logger.debug(f"Discovered mainnet networks (pre-filter): {mainnet_networks_all}") # Log discovered mainnets
 
-            if len(CHAIN_WATCH) != 0:
-                mainnet_networks = [d for d in mainnet_networks if d in CHAIN_WATCH]
+            mainnet_networks = mainnet_networks_all # Assign to original variable
+            if len(CHAIN_WATCH) != 0:  # Use the global variable
+                chain_watch_lower = [c.lower() for c in CHAIN_WATCH]
+                mainnet_networks = [d for d in mainnet_networks_all if d.lower() in chain_watch_lower]
+                global_logger.debug(f"Filtered mainnet networks: {mainnet_networks}") # Log filtered mainnets
 
             testnet_path = os.path.join(repo_path, "testnets")
-            testnet_networks = [
+            testnet_networks_all = [ # Renamed to avoid immediate overwrite
                 d
                 for d in os.listdir(testnet_path)
                 if os.path.isdir(os.path.join(testnet_path, d))
                 and not d.startswith((".", "_"))
             ]
+            global_logger.debug(f"Discovered testnet networks (pre-filter): {testnet_networks_all}") # Log discovered testnets
 
-            if len(CHAIN_WATCH) != 0:
-                testnet_networks = [d for d in testnet_networks if d in CHAIN_WATCH]
+            testnet_networks = testnet_networks_all # Assign to original variable
+            if len(CHAIN_WATCH) != 0:  # Use the global variable
+                chain_watch_lower = [c.lower() for c in CHAIN_WATCH]
+                testnet_networks = [d for d in testnet_networks_all if d.lower() in chain_watch_lower]
+                global_logger.debug(f"Filtered testnet networks: {testnet_networks}") # Log filtered testnets
+
+            # Check if lists are empty after filtering before proceeding
+            if not mainnet_networks and not testnet_networks and len(CHAIN_WATCH) > 0:
+                 global_logger.warning("No matching networks found after filtering with CHAIN_WATCH. Check CHAIN_WATCH values against directory names.")
 
             with ThreadPoolExecutor() as executor:
                 testnet_data = list(
@@ -1254,5 +1268,9 @@ if __name__ == "__main__":
         pass
     # Set debug based on LOG_LEVEL env var
     app.debug = LOG_LEVEL == "DEBUG"
-    start_update_data_thread()
-    app.run(host="0.0.0.0", port=5000, use_reloader=False)
+
+    # Initialize CHAIN_WATCH here
+    CHAIN_WATCH = get_chain_watch_env_var()  # Read env var after load_dotenv() in main context
+
+    start_update_data_thread()  # Start thread after CHAIN_WATCH is set
+    app.run(host="0.0.0.0", port=5001, use_reloader=False)
