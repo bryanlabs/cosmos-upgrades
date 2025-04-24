@@ -56,7 +56,8 @@ requests.packages.urllib3.disable_warnings(
 cache = Cache(app, config={"CACHE_TYPE": "simple"})
 
 # Initialize number of workers
-num_workers = int(os.environ.get("NUM_WORKERS", 10))
+# Increase default workers, still configurable via env var
+num_workers = int(os.environ.get("NUM_WORKERS", 20))
 
 GITHUB_API_URL = "https://api.github.com"
 GITHUB_API_BASE_URL = GITHUB_API_URL + "/repos/cosmos/chain-registry/contents"
@@ -521,7 +522,8 @@ def get_network_repo_semver_tags(network, network_repo_url):
     if not cached_tags:
         network_repo_tag_strings = fetch_network_repo_tags(network, network_repo_url)
         #cache response from network repo url to reduce api calls to whatever service is hosting the repo
-        cache.set(network_repo_url + "_tags", network_repo_tag_strings, timeout=600)
+        # Increase cache timeout to 1 hour (3600 seconds)
+        cache.set(network_repo_url + "_tags", network_repo_tag_strings, timeout=3600)
     else:
         network_repo_tag_strings = cached_tags
 
@@ -1250,6 +1252,7 @@ def get_chains():
 if __name__ == "__main__":
     class RequiresGovV1Exception(Exception):
         pass
-    app.debug = True
+    # Set debug based on LOG_LEVEL env var
+    app.debug = LOG_LEVEL == "DEBUG"
     start_update_data_thread()
-    app.run(host="0.0.0.0", port=5001, use_reloader=False)
+    app.run(host="0.0.0.0", port=5000, use_reloader=False)
