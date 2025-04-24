@@ -797,8 +797,13 @@ def fetch_data_for_networks_wrapper(network, network_type, repo_path):
     try:
         return fetch_data_for_network(network, network_type, repo_path)
     except Exception as e:
-        network_logger.error("Error fetching data for network", error=str(e))
-        raise e
+        network_logger.error(f"Error fetching data for network {network}", error=str(e), exc_info=True)
+        return {
+             "network": network,
+             "type": network_type,
+             "error": f"Unhandled exception in worker: {str(e)}",
+             "upgrade_found": False,
+        }
 
 def is_explorer_healthy(url):
     """Check if an explorer URL is healthy."""
@@ -1120,7 +1125,6 @@ def update_data():
         try:
             repo_path = fetch_repo()
             global_logger.info("Repo path fetched", path=repo_path)
-            # Add a small sleep to yield control after repo fetch
             sleep(0.1)
         except Exception as e:
             global_logger.error("Error downloading and extracting repo", error=str(e))
@@ -1146,27 +1150,22 @@ def update_data():
             global_logger.debug(f"Discovered mainnet networks (pre-filter): {mainnet_networks_all}")
             global_logger.debug(f"Discovered testnet networks (pre-filter): {testnet_networks_all}")
 
-            # Filter out blacklisted networks first *before* CHAIN_WATCH filter
             mainnet_networks_filtered = [net for net in mainnet_networks_all if net.upper() not in network_blacklist_set]
             testnet_networks_filtered = [net for net in testnet_networks_all if net.upper() not in network_blacklist_set]
 
-            # Identify which networks were actually blacklisted from the original list
             blacklisted_mainnets = [net for net in mainnet_networks_all if net.upper() in network_blacklist_set]
             blacklisted_testnets = [net for net in testnet_networks_all if net.upper() in network_blacklist_set]
             all_blacklisted = blacklisted_mainnets + blacklisted_testnets
 
-            # Only log the blacklist info if CHAIN_WATCH is NOT set (meaning blacklist is the primary filter)
             if not CHAIN_WATCH and all_blacklisted:
                 global_logger.info(f"Skipping blacklisted networks: {', '.join(sorted(all_blacklisted))}")
 
-            # Apply CHAIN_WATCH filter if applicable (to the already blacklist-filtered lists)
             mainnet_networks = mainnet_networks_filtered
             if len(CHAIN_WATCH) != 0:
                 chain_watch_lower = {c.lower() for c in CHAIN_WATCH}
                 mainnet_networks = [d for d in mainnet_networks_filtered if d.lower() in chain_watch_lower]
                 global_logger.debug(f"Filtered mainnet networks (post-blacklist, post-watch): {mainnet_networks}")
             else:
-                # Log here if CHAIN_WATCH is not set
                 global_logger.debug(f"Filtered mainnet networks (post-blacklist): {mainnet_networks}")
 
             testnet_networks = testnet_networks_filtered
@@ -1175,31 +1174,27 @@ def update_data():
                 testnet_networks = [d for d in testnet_networks_filtered if d.lower() in chain_watch_lower]
                 global_logger.debug(f"Filtered testnet networks (post-blacklist, post-watch): {testnet_networks}")
             else:
-                # Log here if CHAIN_WATCH is not set
                 global_logger.debug(f"Filtered testnet networks (post-blacklist): {testnet_networks}")
 
             if not mainnet_networks and not testnet_networks:
-                 # Refined warning message
                  if len(CHAIN_WATCH) > 0:
                      global_logger.warning("No matching networks found after filtering with CHAIN_WATCH and blacklist. Check CHAIN_WATCH/NETWORK_BLACKLIST values against directory names.")
-                 elif all_blacklisted: # If CHAIN_WATCH is empty, but blacklist removed everything
+                 elif all_blacklisted:
                       global_logger.warning("All discovered networks were blacklisted.")
-                 else: # Should not happen unless repo is empty/corrupt
+                 else:
                       global_logger.warning("No networks discovered in the repository.")
 
-            # Add another small sleep before starting the thread pool
             sleep(0.1)
 
-            with ThreadPoolExecutor() as executor:
+            with ThreadPoolExecutor(max_workers=NUM_WORKERS) as executor:
                 testnet_data = list(
                     filter(
                         None,
                         executor.map(
-                            lambda network, path: fetch_data_for_networks_wrapper(
-                                network, "testnet", path
+                            lambda network: fetch_data_for_networks_wrapper(
+                                network, "testnet", repo_path
                             ),
                             testnet_networks,
-                            [repo_path] * len(testnet_networks),
                         ),
                     )
                 )
@@ -1207,11 +1202,10 @@ def update_data():
                     filter(
                         None,
                         executor.map(
-                            lambda network, path: fetch_data_for_networks_wrapper(
-                                network, "mainnet", path
+                            lambda network: fetch_data_for_networks_wrapper(
+                                network, "mainnet", repo_path
                             ),
                             mainnet_networks,
-                            [repo_path] * len(mainnet_networks),
                         ),
                     )
                 )
