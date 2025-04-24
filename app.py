@@ -36,6 +36,7 @@ SERVER_BLACKLIST_CSV = os.environ.get("SERVER_BLACKLIST", "https://stride.api.bc
 SERVER_BLACKLIST = [srv.strip() for srv in SERVER_BLACKLIST_CSV.split(",") if srv.strip()]
 NETWORKS_NO_GOV_MODULE_CSV = os.environ.get("NETWORKS_NO_GOV_MODULE_CSV", "noble,nobletestnet")
 NETWORKS_NO_GOV_MODULE = [net.strip() for net in NETWORKS_NO_GOV_MODULE_CSV.split(",") if net.strip()]
+PRIVATE_ENDPOINTS_FILE = os.environ.get("PRIVATE_ENDPOINTS_FILE", "private_endpoints.json")
 COSMWASM_GOV_CONFIG_JSON = os.environ.get("COSMWASM_GOV_CONFIG_JSON", '{"neutron": {"contract_address": "neutron1suhgf5svhu4usrurvxzlgn54ksxmn8gljarjtxqnapv8kjnp4nrs7d743d", "query_type": "list_proposals"}}')
 try:
     COSMWASM_GOV_CONFIG = json.loads(COSMWASM_GOV_CONFIG_JSON)
@@ -61,6 +62,18 @@ CACHE_TYPE = os.environ.get("CACHE_TYPE", "simple")
 CACHE_DIR = os.environ.get("CACHE_DIR", "/tmp/cosmos-upgrades-cache") # Default if not set
 DATA_CACHE_TIMEOUT_SECONDS = int(os.environ.get("DATA_CACHE_TIMEOUT_SECONDS", 600)) # Load the new timeout
 # --- End Configuration Loading ---
+
+# Load private endpoints
+private_endpoints = {}
+try:
+    if os.path.exists(PRIVATE_ENDPOINTS_FILE):
+        with open(PRIVATE_ENDPOINTS_FILE, 'r') as f:
+            private_endpoints = json.load(f)
+        logger.info(f"Loaded private endpoints for {len(private_endpoints)} networks")
+    else:
+        logger.info(f"Private endpoints file {PRIVATE_ENDPOINTS_FILE} not found, using only chain registry endpoints")
+except Exception as e:
+    logger.error(f"Error loading private endpoints file: {str(e)}")
 
 app = Flask(__name__)
 
@@ -183,30 +196,60 @@ def fetch_repo():
     return repo_dir
 
 
-def get_healthy_rpc_endpoints(rpc_endpoints):
+def get_healthy_rpc_endpoints(rpc_endpoints, network=None):
+    # First inject private RPC endpoints if available for this network
+    private_rpcs = []
+    if network and network in private_endpoints and "rpc" in private_endpoints[network]:
+        for rpc_url in private_endpoints[network]["rpc"]:
+            private_rpcs.append({"address": rpc_url, "private": True})
+        logger.debug(f"Added {len(private_rpcs)} private RPC endpoints for {network}")
+    
+    # Combine private and chain registry endpoints (private first)
+    combined_endpoints = private_rpcs + rpc_endpoints
+    
     with ThreadPoolExecutor(max_workers=NUM_WORKERS) as executor:
         healthy_rpc_endpoints = [
             rpc
             for rpc, is_healthy in executor.map(
-                lambda rpc: (rpc, is_rpc_endpoint_healthy(rpc["address"])), rpc_endpoints
+                lambda rpc: (rpc, is_rpc_endpoint_healthy(rpc["address"])), combined_endpoints
             )
             if is_healthy
         ]
 
+    # Log how many private endpoints are healthy
+    private_healthy = sum(1 for ep in healthy_rpc_endpoints if ep.get("private", False))
+    if private_rpcs:
+        logger.debug(f"Found {private_healthy}/{len(private_rpcs)} healthy private RPC endpoints for {network}")
+    
     return healthy_rpc_endpoints[:MAX_HEALTHY_ENDPOINTS]
 
 
-def get_healthy_rest_endpoints(rest_endpoints):
+def get_healthy_rest_endpoints(rest_endpoints, network=None):
+    # First inject private REST endpoints if available for this network
+    private_rests = []
+    if network and network in private_endpoints and "rest" in private_endpoints[network]:
+        for rest_url in private_endpoints[network]["rest"]:
+            private_rests.append({"address": rest_url, "private": True})
+        logger.debug(f"Added {len(private_rests)} private REST endpoints for {network}")
+    
+    # Combine private and chain registry endpoints (private first)
+    combined_endpoints = private_rests + rest_endpoints
+    
     with ThreadPoolExecutor(max_workers=NUM_WORKERS) as executor:
         healthy_rest_endpoints = [
             rest
             for rest, is_healthy in executor.map(
                 lambda rest: (rest, is_rest_endpoint_healthy(rest["address"])),
-                rest_endpoints,
+                combined_endpoints,
             )
             if is_healthy
         ]
 
+    # Log how many private endpoints are healthy
+    private_healthy = sum(1 for ep in healthy_rest_endpoints if ep.get("private", False))
+    if private_rests:
+        logger.debug(f"Found {private_healthy}/{len(private_rests)} healthy private REST endpoints for {network}")
+    
     return healthy_rest_endpoints[:MAX_HEALTHY_ENDPOINTS]
 
 
@@ -938,12 +981,18 @@ def fetch_data_for_network(network, network_type, repo_path):
     network_logger.trace("Fetched explorer URL", url=explorer_url)
 
     latest_block_height = -1
-    healthy_rpc_endpoints = get_healthy_rpc_endpoints(rpc_endpoints)
-    healthy_rest_endpoints = get_healthy_rest_endpoints(rest_endpoints)
+    healthy_rpc_endpoints = get_healthy_rpc_endpoints(rpc_endpoints, network)
+    healthy_rest_endpoints = get_healthy_rest_endpoints(rest_endpoints, network)
     network_logger.debug(f"Found {len(healthy_rpc_endpoints)} healthy RPC endpoints and {len(healthy_rest_endpoints)} healthy REST endpoints")
+    
+    # Log private endpoints separately
+    private_rpc_count = sum(1 for ep in healthy_rpc_endpoints if ep.get("private", False))
+    private_rest_count = sum(1 for ep in healthy_rest_endpoints if ep.get("private", False))
+    if private_rpc_count or private_rest_count:
+        network_logger.info(f"Using {private_rpc_count} private RPC and {private_rest_count} private REST endpoints for {network}")
+    
     healthy_rpc_addresses = [ep.get("address") for ep in healthy_rpc_endpoints if isinstance(ep, dict) and "address" in ep]
     network_logger.debug(f"Healthy RPC endpoints selected: {healthy_rpc_addresses}")
-
 
     if len(healthy_rpc_endpoints) == 0:
         network_logger.error(

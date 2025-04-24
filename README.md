@@ -31,6 +31,43 @@ If a particular network or chain is not present in the `chain-registry`, the `co
 
 By doing so, not only do you enhance the tool's capabilities, but you also contribute to the broader Cosmos community.
 
+## 🔒 Using Private Endpoints
+
+If you operate your own RPC and REST endpoints for Cosmos chains, you can configure the tool to prioritize these private endpoints over the ones in the chain registry.
+
+### Setting Up Private Endpoints
+
+1. Create or modify the `private_endpoints.json` file in the root directory with your private endpoint information:
+
+```json
+{
+  "osmosis": {
+    "rpc": ["https://my-private-osmosis-rpc.example.com"],
+    "rest": ["https://my-private-osmosis-rest.example.com"]
+  },
+  "cosmoshub": {
+    "rpc": ["https://my-private-cosmoshub-rpc.example.com:26657", "https://my-backup-cosmoshub-rpc.example.com:26657"],
+    "rest": ["https://my-private-cosmoshub-rest.example.com:1317"]
+  }
+}
+```
+
+2. The tool will automatically detect and prioritize these endpoints during the data fetching process.
+
+3. You can specify a custom path for this file using the `PRIVATE_ENDPOINTS_FILE` environment variable in `.env`:
+
+```
+PRIVATE_ENDPOINTS_FILE=/path/to/my/private_endpoints.json
+```
+
+### Benefits of Private Endpoints
+
+- **Reliability:** Use your own infrastructure for critical monitoring
+- **Reduced Latency:** Private endpoints may be faster than public ones
+- **Customization:** Easily switch between different endpoint configurations
+
+The tool will always check your private endpoints first, and fall back to chain registry endpoints if yours are unavailable.
+
 ## 🚀 Making Requests
 
 To fetch the scheduled upgrades, you can use the following `curl` command for both mainnets and testnets:
