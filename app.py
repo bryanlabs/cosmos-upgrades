@@ -25,6 +25,7 @@ load_dotenv(find_dotenv(), override=True)
 
 # --- Configuration Loading ---
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
+LOG_FORCE_COLOR = os.environ.get("LOG_FORCE_COLOR", "false").lower() == "true"
 APP_VERSION = os.environ.get("APP_VERSION", "unknown") # Load the app version
 NETWORK_BLACKLIST_CSV = os.environ.get("NETWORK_BLACKLIST", "")
 NETWORK_BLACKLIST = [net.strip() for net in NETWORK_BLACKLIST_CSV.split(",") if net.strip()]
@@ -94,6 +95,11 @@ else:
     actual_log_level = "INFO"
     logger.add(sys.stderr, format=info_format, colorize=True, level=actual_log_level)
     LOG_LEVEL = actual_log_level
+
+# If force color is requested, use environment variable to make loguru always colorize output
+if LOG_FORCE_COLOR:
+    os.environ["FORCE_COLOR"] = "1"
+    logger.info("Forcing colored output for logs (useful for k9s and other tools)")
 
 # Log the configured level and app version
 logger.info(f"--- Configuration ---")
