@@ -567,9 +567,11 @@ def reorder_data(data):
     return ordered_data
 
 
-def fetch_data_for_network(network, network_type, repo_path, custom_logger=None):
+# Modify fetch_data_for_network to accept progress_text
+def fetch_data_for_network(network, network_type, repo_path, custom_logger=None, progress_text=""):
     """Fetch data for a given network."""
-    network_logger = custom_logger or logger.bind(network=network.upper(), progress="")
+    # Use the provided progress_text when binding the logger
+    network_logger = custom_logger or logger.bind(network=network.upper(), progress=progress_text)
     network_logger.trace("Starting data fetch for network")
     
     # Add timing instrumentation
@@ -707,6 +709,8 @@ def fetch_data_for_network(network, network_type, repo_path, custom_logger=None)
     source = ""
     rest_server_used = ""
     output_data = {}
+    # Initialize upgrade status message with default (no upgrade found)
+    upgrade_status_message = f"No upgrade found (checked {len(healthy_rest_endpoints)} endpoint(s))" 
 
     # Optimize proposal checks by doing one per REST endpoint
     for rest_endpoint in healthy_rest_endpoints:
@@ -741,6 +745,8 @@ def fetch_data_for_network(network, network_type, repo_path, custom_logger=None)
                 upgrade_name = current_upgrade_name
                 output_data["upgrade_plan"] = current_plan_dump
                 source = "current_upgrade_plan"
+                # Update status message
+                upgrade_status_message = f"Upgrade '{upgrade_name}' found at block {upgrade_block_height} via {source}"
                 found_upgrade_on_endpoint = True
                 rest_server_used = current_endpoint
             else:
@@ -765,6 +771,8 @@ def fetch_data_for_network(network, network_type, repo_path, custom_logger=None)
                     upgrade_version = active_upgrade_version
                     upgrade_name = active_upgrade_name
                     source = "active_upgrade_proposals"
+                    # Update status message
+                    upgrade_status_message = f"Upgrade '{upgrade_name}' found at block {upgrade_block_height} via {source}"
                     found_upgrade_on_endpoint = True
                     rest_server_used = current_endpoint
                 else:
@@ -796,6 +804,8 @@ def fetch_data_for_network(network, network_type, repo_path, custom_logger=None)
                     upgrade_version = cosmwasm_upgrade_version
                     upgrade_name = cosmwasm_upgrade_name
                     source = "cosmwasm_governance"
+                    # Update status message
+                    upgrade_status_message = f"Upgrade '{upgrade_name}' found at block {upgrade_block_height} via {source}"
                     found_upgrade_on_endpoint = True
                     rest_server_used = current_endpoint
                 else:
@@ -807,12 +817,10 @@ def fetch_data_for_network(network, network_type, repo_path, custom_logger=None)
         network_logger.debug(f"REST endpoint {current_endpoint} checks took {endpoint_duration:.2f}s")
         
         if found_upgrade_on_endpoint:
-            network_logger.info(f"Upgrade found for {network} via {source} on endpoint {rest_server_used}",
-                           name=upgrade_name, version=upgrade_version, height=upgrade_block_height)
-            break
+            break # Exit loop once upgrade is found
 
+    # After the loop, if no upgrade was found, ensure rest_server_used is set for the final data
     if not found_upgrade_on_endpoint:
-        network_logger.info(f"No upgrade found for {network} after checking all {len(healthy_rest_endpoints)} healthy REST endpoint(s).")
         rest_server_used = healthy_rest_endpoints[0]["address"] if healthy_rest_endpoints else ""
 
     # Estimate upgrade time if an upgrade was found
@@ -878,8 +886,10 @@ def fetch_data_for_network(network, network_type, repo_path, custom_logger=None)
         "logo_urls": logo_urls,
         "explorer_url": explorer_url,
     }
+    
+    # Log the combined completion message (network_logger already has the progress_text bound)
     total_duration = (datetime.now() - start_time).total_seconds()
-    network_logger.info(f"Completed fetch data for {network} in {total_duration:.2f}s")
+    network_logger.info(f"Completed fetch data for {network} in {total_duration:.2f}s - {upgrade_status_message}") 
     network_logger.debug("Completed fetch data for network", final_data=final_output_data)
     return final_output_data
 
@@ -966,26 +976,23 @@ def update_data():
             completed_networks = 0
             progress_lock = threading.Lock()
             
-            # Define the process_network_with_progress function with proper scope
+            # Modify the process_network_with_progress function
             def process_network_with_progress(network, network_type):
-                result = None
-                try:
-                    # Add debug statement to track which network is being processed
-                    logger.debug(f"Starting processing of {network} ({network_type})")
-                    result = fetch_data_for_network(network, network_type, repo_path)
-                except Exception as e:
-                    logger.error(f"Error processing network {network}: {str(e)}")
-                
-                # Update progress counter - outside the try/except to ensure it's always incremented
-                nonlocal completed_networks  # Use nonlocal AFTER the variable is defined in the outer scope
+                # Calculate progress text first
+                nonlocal completed_networks
                 with progress_lock:
                     completed_networks += 1
-                    # Create progress text and log it in the progress field, not in the message
-                    percent = completed_networks / total_networks * 100
-                    progress_text = f"{completed_networks}/{total_networks}"
-                    # Use the progress field for the progress indicator
-                    progress_logger = logger.bind(network="GLOBAL", progress=progress_text)
-                    progress_logger.info(f"Progress: {percent:.1f}%")
+                    percent = completed_networks / total_networks * 100 if total_networks > 0 else 100
+                    progress_text = f"{completed_networks}/{total_networks}" # Store progress text
+
+                result = None
+                try:
+                    # Pass progress_text to fetch_data_for_network
+                    result = fetch_data_for_network(network, network_type, repo_path, progress_text=progress_text)
+                except Exception as e:
+                    # Log error with network context, progress will be empty here
+                    error_logger = logger.bind(network=network.upper(), progress="") 
+                    error_logger.error(f"Error processing network {network}: {str(e)}")
                 
                 return result
             
