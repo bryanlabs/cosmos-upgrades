@@ -897,7 +897,7 @@ def update_data():
 
         try:
             repo_path = fetch_repo()
-            global_logger.info("Repo path fetched", path=repo_path)
+            global_logger.info("Repo path fetched")
             sleep(0.1)
         except Exception as e:
             global_logger.error("Error downloading and extracting repo", error=str(e))
@@ -962,62 +962,78 @@ def update_data():
             total_networks = len(testnet_networks) + len(mainnet_networks)
             global_logger.info(f"Processing {total_networks} networks ({len(mainnet_networks)} mainnets, {len(testnet_networks)} testnets)")
             
-            # Create progress counters and custom logger format for progress
+            # Create progress counter and lock
             completed_networks = 0
             progress_lock = threading.Lock()
             
-            # Add a wrapper function to track progress
+            # Define the process_network_with_progress function with proper scope
             def process_network_with_progress(network, network_type):
-                nonlocal completed_networks
+                result = None
+                try:
+                    # Add debug statement to track which network is being processed
+                    logger.debug(f"Starting processing of {network} ({network_type})")
+                    result = fetch_data_for_network(network, network_type, repo_path)
+                except Exception as e:
+                    logger.error(f"Error processing network {network}: {str(e)}")
                 
-                # Use regular logger with empty progress field for network processing
-                network_specific_logger = logger.bind(network=network.upper(), progress="")
-                
-                # Call fetch_data_for_network with the network-specific logger
-                result = fetch_data_for_network(network, network_type, repo_path, network_specific_logger)
-                
+                # Update progress counter - outside the try/except to ensure it's always incremented
+                nonlocal completed_networks  # Use nonlocal AFTER the variable is defined in the outer scope
                 with progress_lock:
                     completed_networks += 1
+                    # Create progress text and log it in the progress field, not in the message
                     percent = completed_networks / total_networks * 100
-                    progress_text = f"[{completed_networks}/{total_networks}]"
-                    
-                    # Create progress logger with dedicated progress column
+                    progress_text = f"{completed_networks}/{total_networks}"
+                    # Use the progress field for the progress indicator
                     progress_logger = logger.bind(network="GLOBAL", progress=progress_text)
-                    progress_logger.info(f"Completed {network} ({network_type})")
-                    
+                    progress_logger.info(f"Progress: {percent:.1f}%")
+                
                 return result
             
+            # Add a watchdog timer to detect if processing hangs
+            def watchdog_timer():
+                last_completed = 0
+                while completed_networks < total_networks:
+                    sleep(60)  # Check every minute
+                    if completed_networks == last_completed:
+                        global_logger.warning(f"Processing appears to be stuck at {completed_networks}/{total_networks} networks")
+                    last_completed = completed_networks
+
+            # Start the watchdog in a separate thread
+            watchdog_thread = threading.Thread(target=watchdog_timer)
+            watchdog_thread.daemon = True
+            watchdog_thread.start()
+
             with ThreadPoolExecutor(max_workers=NUM_WORKERS) as executor:
+                # Process testnet networks
+                global_logger.debug(f"Submitting {len(testnet_networks)} testnet networks to thread pool")
                 testnet_data = list(
                     filter(
                         None,
                         executor.map(
-                            lambda network: process_network_with_progress(
-                                network, "testnet"
-                            ),
+                            lambda network: process_network_with_progress(network, "testnet"),
                             testnet_networks,
                         ),
                     )
                 )
+                
+                # Process mainnet networks
+                global_logger.debug(f"Submitting {len(mainnet_networks)} mainnet networks to thread pool")
                 mainnet_data = list(
                     filter(
                         None,
                         executor.map(
-                            lambda network: process_network_with_progress(
-                                network, "mainnet"
-                            ),
+                            lambda network: process_network_with_progress(network, "mainnet"),
                             mainnet_networks,
                         ),
                     )
                 )
+
             # Set data in cache with timeout based on DATA_CACHE_TIMEOUT_SECONDS
             cache.set("MAINNET_DATA", mainnet_data, timeout=DATA_CACHE_TIMEOUT_SECONDS)
             cache.set("TESTNET_DATA", testnet_data, timeout=DATA_CACHE_TIMEOUT_SECONDS)
-            
-            elapsed_time = (
-                datetime.now() - start_time
-            ).total_seconds()
-            
+
+            # Log completion
+            elapsed_time = (datetime.now() - start_time).total_seconds()
             minutes, seconds = divmod(int(elapsed_time), 60)
             time_format = f"{minutes}m {seconds}s" if minutes > 0 else f"{seconds}s"
             avg_time_per_network = elapsed_time / total_networks if total_networks > 0 else 0
@@ -1028,9 +1044,7 @@ def update_data():
             )
             sleep(UPDATE_INTERVAL_SECONDS)
         except Exception as e:
-            elapsed_time = (
-                datetime.now() - start_time
-            ).total_seconds()
+            elapsed_time = (datetime.now() - start_time).total_seconds()
             global_logger.exception("Error in update_data loop", elapsed_time=elapsed_time, error=str(e))
             global_logger.info(f"Sleeping for {UPDATE_INTERVAL_SECONDS} seconds before retrying...")
             sleep(UPDATE_INTERVAL_SECONDS)
