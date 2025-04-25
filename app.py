@@ -140,9 +140,9 @@ app = Flask(__name__)
 logger.remove()
 logger = logger.bind(network="GLOBAL", progress="")
 
-# Define log formats with an additional column for progress
-debug_format = "<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <yellow>{extra[progress]: <10}</yellow> | <cyan>{extra[network]}</cyan> | <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>"
-info_format = "<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <yellow>{extra[progress]: <10}</yellow> | <cyan>{extra[network]}</cyan> - <level>{message}</level>"
+# Define log formats with an additional column for progress and boxed network name
+debug_format = "<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <yellow>{extra[progress]: <10}</yellow> | <magenta>[</magenta><blue>{extra[network]}</blue><magenta>]</magenta> | <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>"
+info_format = "<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <yellow>{extra[progress]: <10}</yellow> | <magenta>[</magenta><blue>{extra[network]}</blue><magenta>]</magenta> - <level>{message}</level>"
 
 # Add handler based on LOG_LEVEL
 if LOG_LEVEL == "TRACE":
@@ -889,7 +889,17 @@ def fetch_data_for_network(network, network_type, repo_path, custom_logger=None,
     
     # Log the combined completion message (network_logger already has the progress_text bound)
     total_duration = (datetime.now() - start_time).total_seconds()
-    network_logger.info(f"Completed fetch data for {network} in {total_duration:.2f}s - {upgrade_status_message}") 
+    
+    # Format the message in a more concise way with colored time
+    endpoint_count = len(healthy_rest_endpoints)
+    endpoint_msg = f"{endpoint_count} endpoint{'s' if endpoint_count != 1 else ''}"
+    
+    # Extract upgrade info for more concise display
+    upgrade_info = "No Upgrade Found" if not upgrade_version else f"Upgrade '{upgrade_name}' at block {upgrade_block_height}"
+    
+    # Format: "COMPLETE - [colored duration] - endpoint count - upgrade status"
+    network_logger.info(f"COMPLETE - <yellow>{total_duration:.2f}s</yellow> - {endpoint_msg} - {upgrade_info}")
+    
     network_logger.debug("Completed fetch data for network", final_data=final_output_data)
     return final_output_data
 
