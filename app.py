@@ -138,11 +138,11 @@ app = Flask(__name__)
 
 # Set log level based on environment variable (already loaded)
 logger.remove()
-logger = logger.bind(network="GLOBAL")
+logger = logger.bind(network="GLOBAL", progress="")
 
-# Define log formats
-debug_format = "<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <cyan>{extra[network]}</cyan> | <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>"
-info_format = "<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <cyan>{extra[network]}</cyan> - <level>{message}</level>"
+# Define log formats with an additional column for progress
+debug_format = "<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <yellow>{extra[progress]: <10}</yellow> | <cyan>{extra[network]}</cyan> | <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>"
+info_format = "<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <yellow>{extra[progress]: <10}</yellow> | <cyan>{extra[network]}</cyan> - <level>{message}</level>"
 
 # Add handler based on LOG_LEVEL
 if LOG_LEVEL == "TRACE":
@@ -369,7 +369,7 @@ def get_healthy_rest_endpoints(rest_endpoints, network=None):
 
 def is_rpc_endpoint_healthy(endpoint, network=None):
     timeout = get_network_timeout(network, HEALTH_CHECK_TIMEOUT_SECONDS, "health_check")
-    network_logger = logger.bind(network=network.upper() if network else "UNKNOWN")
+    network_logger = logger.bind(network=network.upper() if network else "UNKNOWN", progress="")
     
     if network and network.lower() in NETWORK_DIAGNOSTICS:
         start_time = datetime.now()
@@ -399,7 +399,7 @@ def is_rpc_endpoint_healthy(endpoint, network=None):
 
 def is_rest_endpoint_healthy(endpoint, network=None):
     timeout = get_network_timeout(network, HEALTH_CHECK_TIMEOUT_SECONDS, "health_check")
-    network_logger = logger.bind(network=network.upper() if network else "UNKNOWN")
+    network_logger = logger.bind(network=network.upper() if network else "UNKNOWN", progress="")
     
     if network and network.lower() in NETWORK_DIAGNOSTICS:
         start_time = datetime.now()
@@ -434,7 +434,7 @@ def is_rest_endpoint_healthy(endpoint, network=None):
 def get_latest_block_height_rpc(rpc_url, network=None):
     """Fetch the latest block height from the RPC endpoint."""
     timeout = get_network_timeout(network, STATUS_TIMEOUT_SECONDS, "status")
-    network_logger = logger.bind(network=network.upper() if network else "UNKNOWN")
+    network_logger = logger.bind(network=network.upper() if network else "UNKNOWN", progress="")
     
     if network and network.lower() in NETWORK_DIAGNOSTICS:
         start_time = datetime.now()
@@ -469,7 +469,7 @@ def get_latest_block_height_rpc(rpc_url, network=None):
 def get_block_time_rpc(rpc_url, height, retries=None, network=None):
     """Fetch the block header time for a given block height from the RPC endpoint."""
     effective_retries = retries if retries is not None else BLOCK_TIME_RETRIES
-    network_logger = logger.bind(network=network.upper() if network else "UNKNOWN")
+    network_logger = logger.bind(network=network.upper() if network else "UNKNOWN", progress="")
     timeout = get_network_timeout(network, BLOCK_FETCH_TIMEOUT_SECONDS, "block_fetch")
     
     if network and network.lower() in NETWORK_DIAGNOSTICS:
@@ -517,7 +517,7 @@ def get_block_time_rpc(rpc_url, height, retries=None, network=None):
 
 
 def fetch_active_upgrade_proposals(rest_url, network, network_repo_url):
-    network_logger = logger.bind(network=network.upper())
+    network_logger = logger.bind(network=network.upper(), progress="")
     
     if network and network.lower() in NETWORK_DIAGNOSTICS:
         start_time = datetime.now()
@@ -567,9 +567,9 @@ def reorder_data(data):
     return ordered_data
 
 
-def fetch_data_for_network(network, network_type, repo_path):
+def fetch_data_for_network(network, network_type, repo_path, custom_logger=None):
     """Fetch data for a given network."""
-    network_logger = logger.bind(network=network.upper())
+    network_logger = custom_logger or logger.bind(network=network.upper(), progress="")
     network_logger.trace("Starting data fetch for network")
     
     # Add timing instrumentation
@@ -886,7 +886,7 @@ def fetch_data_for_network(network, network_type, repo_path):
 
 # periodic cache update
 def update_data():
-    global_logger = logger.bind(network="GLOBAL")
+    global_logger = logger.bind(network="GLOBAL", progress="")
     global CHAIN_WATCH
     network_blacklist_set = {net.strip().upper() for net in NETWORK_BLACKLIST if net.strip()}
 
@@ -966,34 +966,22 @@ def update_data():
             completed_networks = 0
             progress_lock = threading.Lock()
             
-            # Custom progress formatter function
-            def format_with_progress(record):
-                if record["extra"].get("progress"):
-                    # Match the exact spacing of regular logs (8 characters)
-                    level_str = f"{record['level'].name: <8}"  # Make sure this is exactly 8 spaces
-                    # Make the progress box smaller with exact spacing
-                    progress_str = f"{record['extra']['progress']}"
-                    # Replace the level field with level+progress, maintaining alignment
-                    record["level"].name = f"{level_str}{progress_str}"
-                return record
-            
-            # Add the formatter to the logger
-            logger.configure(patcher=format_with_progress)
-            
             # Add a wrapper function to track progress
             def process_network_with_progress(network, network_type):
                 nonlocal completed_networks
-                result = fetch_data_for_network(network, network_type, repo_path)
+                
+                # Use regular logger with empty progress field for network processing
+                network_specific_logger = logger.bind(network=network.upper(), progress="")
+                
+                # Call fetch_data_for_network with the network-specific logger
+                result = fetch_data_for_network(network, network_type, repo_path, network_specific_logger)
                 
                 with progress_lock:
                     completed_networks += 1
                     percent = completed_networks / total_networks * 100
-                    # Create a progress format that maintains alignment with regular logs
-                    # Regular logs have "INFO     | NETWORK"
-                    # We want        "INFO     | [X/Y] | NETWORK"
-                    progress_text = f"| [{completed_networks}/{total_networks}] "
+                    progress_text = f"[{completed_networks}/{total_networks}]"
                     
-                    # Log the progress with a custom extra field
+                    # Create progress logger with dedicated progress column
                     progress_logger = logger.bind(network="GLOBAL", progress=progress_text)
                     progress_logger.info(f"Completed {network} ({network_type})")
                     
