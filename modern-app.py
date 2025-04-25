@@ -515,6 +515,240 @@ def get_block_time_rpc(rpc_url, height, retries=None, network=None):
 
     return None
 
+def fetch_active_upgrade_proposals_v1beta1(rest_url, network, network_repo_url):
+    network_logger = logger.bind(network=network.upper())  # Add logger binding
+    try:
+        response = requests.get(
+            f"{rest_url}/cosmos/gov/v1beta1/proposals?proposal_status=2", verify=False
+        )
+
+        # Handle 501 Server Error
+        if response.status_code == 501:
+            return None, None
+
+        # check if the endpoint requires v1 instead of v1beta1
+        if response.status_code != 200:
+            response_json = {}
+            try:
+                response_json = response.json()
+            except:
+                pass
+            if "message" in response_json and "can't convert" in response_json["message"]:
+                raise RequiresGovV1Exception("gov v1 is required")
+
+        response.raise_for_status()
+        data = response.json()
+
+        for proposal in data.get("proposals", []):
+            content = proposal.get("content", {})
+            proposal_type = content.get("@type")
+            if (
+                proposal_type
+                == "/cosmos.upgrade.v1beta1.SoftwareUpgradeProposal" or
+                proposal_type
+                == '/cosmos.upgrade.v1beta1.MsgSoftwareUpgrade'
+            ):
+                # Extract version from the plan name
+                plan = content.get("plan", {})
+                plan_name = plan.get("name", "")
+
+                # naive regex search on whole message dump
+                content_dump = json.dumps(content)
+
+                # we tried plan_name regex match only, but the plan_name does not always track the version string
+                # see Terra v5 upgrade which points to the v2.2.1 version tag
+                versions = SEMANTIC_VERSION_PATTERN.findall(content_dump)
+                if versions:
+                    network_repo_semver_tags = get_network_repo_semver_tags(network, network_repo_url)
+                    version = find_best_semver_for_versions(network, versions, network_repo_semver_tags)
+                try:
+                    height = int(plan.get("height", 0))
+                except ValueError:
+                    height = 0
+
+                if version:
+                    return plan_name, version, height
+        return None, None, None
+    except requests.RequestException as e:
+        status_code = e.response.status_code if e.response is not None else "N/A"
+        network_logger.error(
+            "RequestException received from server during v1beta1 proposal fetch",
+            server=rest_url,
+            status_code=status_code,
+            error=str(e),
+        )
+        raise e
+    except RequiresGovV1Exception as e:
+        network_logger.debug("RequiresGovV1Exception caught, will try v1 endpoint", server=rest_url)
+        raise e
+    except Exception as e:
+        network_logger.error(
+            f"Unhandled error while requesting v1beta1 active upgrade endpoint",
+            server=rest_url,
+            error=str(e),
+            error_type=type(e).__name__,
+            trace=traceback.format_exc()
+        )
+        raise e
+    
+def fetch_active_upgrade_proposals_v1(rest_url, network, network_repo_url):
+    network_logger = logger.bind(network=network.upper())  # Add logger binding
+    try:
+        response = requests.get(
+            f"{rest_url}/cosmos/gov/v1/proposals?proposal_status=2", verify=False
+        )
+
+        # Handle 501 Server Error
+        if response.status_code == 501:
+            return None, None
+
+        response.raise_for_status()
+        data = response.json()
+
+        for proposal in data.get("proposals", []):
+            messages = proposal.get("messages", [])
+
+            for message in messages:
+                proposal_type = message.get("@type")
+                if (
+                    proposal_type
+                    == "/cosmos.upgrade.v1beta1.SoftwareUpgradeProposal" or
+                    proposal_type
+                    == '/cosmos.upgrade.v1beta1.MsgSoftwareUpgrade'
+                ):
+                    # Extract version from the plan name
+                    plan = message.get("plan", {})
+                    plan_name = plan.get("name", "")
+
+                    # naive regex search on whole message dump
+                    content_dump = json.dumps(message)
+
+                    # we tried plan_name regex match only, but the plan_name does not always track the version string
+                    # see Terra v5 upgrade which points to the v2.2.1 version tag
+                    versions = SEMANTIC_VERSION_PATTERN.findall(content_dump)
+                    if versions:
+                        network_repo_semver_tags = get_network_repo_semver_tags(network, network_repo_url)
+                        version = find_best_semver_for_versions(network, versions, network_repo_semver_tags)
+                    try:
+                        height = int(plan.get("height", 0))
+                    except ValueError:
+                        height = 0
+
+                    if version:
+                        return plan_name, version, height
+        return None, None, None
+    except requests.RequestException as e:
+        status_code = e.response.status_code if e.response is not None else "N/A"
+        network_logger.error(
+            "RequestException received from server during v1 proposal fetch",
+            server=rest_url,
+            status_code=status_code,
+            error=str(e),
+        )
+        raise e
+    except Exception as e:
+        network_logger.error(
+            "Unhandled error while requesting v1 active upgrade endpoint",
+            server=rest_url,
+            error=str(e),
+            error_type=type(e).__name__,
+            trace=traceback.format_exc()
+        )
+        raise e
+
+def get_network_repo_semver_tags(network, network_repo_url):
+    cached_tags = cache.get(network_repo_url + "_tags")
+    if not cached_tags:
+        network_repo_tag_strings = fetch_network_repo_tags(network, network_repo_url)
+        #cache response from network repo url to reduce api calls to whatever service is hosting the repo
+        cache.set(network_repo_url + "_tags", network_repo_tag_strings, timeout=600)
+    else:
+        network_repo_tag_strings = cached_tags
+
+    network_repo_semver_tags = []
+    for tag in network_repo_tag_strings:
+        #only use semantic version tags
+        try:
+            if tag.startswith("v"):
+                version = semantic_version.Version(tag[1:])
+            else:
+                version = semantic_version.Version(tag)
+            network_repo_semver_tags.append(version)
+        except Exception as e:
+            pass
+
+    return network_repo_semver_tags
+
+def find_best_semver_for_versions(network, network_version_strings, network_repo_semver_tags):
+    if len(network_repo_semver_tags) == 0:
+        return max(network_version_strings, key=len)
+
+    try:
+        # find version matches in the repo tags
+        possible_semvers = []
+        for version_string in network_version_strings:
+            if version_string.startswith("v"):
+                version_string = version_string[1:]
+
+            contains_minor_version = True
+            contains_patch_version = True
+
+            # our regex captures version strings like "v1" without a minor or patch version, so we need to check for that
+            # are these conditions good enough or is it missing any cases?
+            if "." not in version_string:
+                contains_minor_version = False
+                contains_patch_version = False
+                version_string = version_string + ".0.0"
+            elif version_string.count(".") == 1:
+                contains_patch_version = False
+                version_string = version_string + ".0"
+
+            current_semver = semantic_version.Version(version_string)
+
+            for semver_tag in network_repo_semver_tags:
+                # find matching tags based on what information we have
+                if semver_tag.major == current_semver.major:
+                    if contains_minor_version:
+                        if semver_tag.minor == current_semver.minor:
+                            if contains_patch_version:
+                                if semver_tag.patch == current_semver.patch:
+                                    possible_semvers.append(semver_tag)
+                            else:
+                                possible_semvers.append(semver_tag)
+                    else:
+                        possible_semvers.append(semver_tag)
+
+        # currently just return the highest semver from the list of possible matches. This may be too naive
+        if len(possible_semvers) != 0:
+            #sorting is built into the semantic version library
+            possible_semvers.sort(reverse=True)
+            semver = possible_semvers[0]
+            return f"v{semver.major}.{semver.minor}.{semver.patch}"
+    except Exception as e:
+        logger.error("Failed to parse version strings into semvers", network=network, error=str(e))
+        return max(network_version_strings, key=len)
+
+    return max(network_version_strings, key=len)
+
+# Add pagination support for GitHub API
+def fetch_network_repo_tags(network, network_repo):
+    if "github.com" in network_repo:
+        try:
+            repo_parts = network_repo.split("/")
+            repo_name = repo_parts[-1]
+            repo_owner = repo_parts[-2]
+            tags_url = f"{GITHUB_API_URL}/repos/{repo_owner}/{repo_name}/tags"
+            tags = []
+            while tags_url:
+                response = requests.get(tags_url)
+                response.raise_for_status()
+                tags.extend(response.json())
+                tags_url = response.links.get("next", {}).get("url")
+            return [tag["name"] for tag in tags]
+        except Exception as e:
+            logger.error("Error fetching tags", network=network, error=str(e))
+            return []
+    return []
 
 def fetch_active_upgrade_proposals(rest_url, network, network_repo_url):
     network_logger = logger.bind(network=network.upper(), progress="")
@@ -523,7 +757,7 @@ def fetch_active_upgrade_proposals(rest_url, network, network_repo_url):
         start_time = datetime.now()
 
     try:
-        [plan_name, version, height] = fetch_active_upgrade_proposals_v1(rest_url, network, network_repo_url)
+        [plan_name, version, height] = fetch_active_upgrade_proposals_v1beta1(rest_url, network, network_repo_url)
 
         if network and network.lower() in NETWORK_DIAGNOSTICS:
             duration = (datetime.now() - start_time).total_seconds()
@@ -545,6 +779,236 @@ def fetch_active_upgrade_proposals(rest_url, network, network_repo_url):
 
     return plan_name, version, height
 
+def fetch_current_upgrade_plan(rest_url, network, network_repo_url):
+    network_logger = logger.bind(network=network.upper())  # Bind the network name to the logger
+    try:
+        response = requests.get(
+            f"{rest_url}/cosmos/upgrade/v1beta1/current_plan", verify=False
+        )
+        response.raise_for_status()
+        data = response.json()
+
+        plan = data.get("plan", {})
+        if plan:
+            plan_name = plan.get("name", "")
+
+            # Convert the plan to string and search for the version pattern
+            plan_dump = json.dumps(plan)
+
+            # Get all version matches
+            version_matches = SEMANTIC_VERSION_PATTERN.findall(plan_dump)
+
+            if version_matches:
+                # Find the longest match
+                network_repo_semver_tags = get_network_repo_semver_tags(network, network_repo_url)
+                version = find_best_semver_for_versions(network, version_matches, network_repo_semver_tags)
+                try:
+                    height = int(plan.get("height", 0))
+                except ValueError:
+                    height = 0
+                return plan_name, version, height, plan_dump
+
+        return None, None, None, None
+    except requests.RequestException as e:
+        status_code = e.response.status_code if e.response is not None else "N/A"
+        network_logger.error(
+            "RequestException received from server during current plan fetch",
+            server=rest_url,
+            status_code=status_code,
+            error=str(e),
+        )
+        raise e
+    except Exception as e:
+        network_logger.error(
+            "Unhandled error while requesting current upgrade endpoint",
+            server=rest_url,
+            error=str(e),
+            error_type=type(e).__name__,
+            trace=traceback.format_exc()
+        )
+        raise e
+    
+def fetch_cosmwasm_upgrade_proposal(rest_url, contract_address, query_type, network_name, network_repo_url):
+    """
+    Fetches software upgrade proposals from a CosmWasm governance contract.
+    """
+    network_logger = logger.bind(network=network_name.upper())
+    network_logger.debug(f"Attempting CosmWasm query '{query_type}' for {network_name} gov contract {contract_address} at {rest_url}")
+
+    # --- Construct Query ---
+    # Adapt query based on query_type, assuming list_proposals for now
+    if query_type == "list_proposals":
+         # Query last ~20 proposals, hoping active ones are recent. Add pagination if needed.
+        query_msg = {"list_proposals": {"limit": 20}}
+    else:
+        network_logger.error(f"Unsupported CosmWasm query type: {query_type}")
+        return None, None, None
+
+    query_msg_json = json.dumps(query_msg)
+    query_msg_base64 = base64.b64encode(query_msg_json.encode('utf-8')).decode('utf-8')
+    api_url = f"{rest_url}/cosmwasm/wasm/v1/contract/{contract_address}/smart/{query_msg_base64}"
+
+    try:
+        response = requests.get(api_url, timeout=10, verify=False) # Increased timeout
+        response.raise_for_status()
+        data = response.json()
+
+        proposals_data = data.get("data", {}).get("proposals", [])
+        network_logger.debug(f"Found {len(proposals_data)} proposals via CosmWasm query")
+
+        # Iterate proposals in reverse (newest first)
+        for prop_container in reversed(proposals_data):
+            proposal = prop_container.get("proposal", {})
+            prop_id = prop_container.get("id")
+            status = proposal.get("status", "unknown").lower()
+
+            # Only consider proposals that might be active or recently passed
+            # Adjust statuses based on the specific contract's state machine
+            if status not in ["open", "passed", "executed", "neutron.cron.Schedule"]: # Neutron might use Schedule status
+                network_logger.debug(f"Skipping proposal {prop_id} with status '{status}'")
+                continue
+
+            network_logger.debug(f"Checking proposal ID {prop_id} with status '{status}'")
+
+            msgs = proposal.get("msgs", [])
+            for msg_container in msgs:
+                # Check for Stargate message first (more standard)
+                stargate_msg = msg_container.get("stargate")
+                if stargate_msg:
+                    type_url = stargate_msg.get("type_url")
+                    value_b64 = stargate_msg.get("value")
+                    if type_url == "/cosmos.upgrade.v1beta1.MsgSoftwareUpgrade" and value_b64:
+                        network_logger.debug(f"Found Stargate MsgSoftwareUpgrade in proposal {prop_id}")
+                        # Attempt to parse the base64 value
+                        # NOTE: Proper protobuf parsing is needed here for reliability.
+                        # Using a placeholder regex approach for now.
+                        plan_name_approx, version_approx, height_approx = parse_stargate_msg_software_upgrade(value_b64)
+
+                        if height_approx and height_approx > 0:
+                             # Use the approximate version found by regex
+                             version = version_approx # Or try to refine using find_best_semver_for_versions if needed
+                             if version:
+                                 network_logger.info(f"Found {network_name} upgrade via CosmWasm (Stargate): Name={plan_name_approx}, Version={version}, Height={height_approx}")
+                                 return plan_name_approx, version, height_approx
+                             else:
+                                 network_logger.warning(f"Could not determine version for Stargate upgrade in prop {prop_id}")
+                        continue # Move to next message if parsing failed
+
+                # Placeholder: Check for Wasm Execute message (less standard for x/upgrade)
+                wasm_execute = msg_container.get("wasm", {}).get("execute", {})
+                if wasm_execute:
+                    try:
+                        inner_msg_b64 = wasm_execute.get("msg")
+                        if inner_msg_b64:
+                            inner_msg_json = base64.b64decode(inner_msg_b64).decode('utf-8')
+                            inner_msg = json.loads(inner_msg_json)
+
+                            # Look for a specific pattern like 'schedule_upgrade'
+                            schedule_upgrade = inner_msg.get("schedule_upgrade", {})
+                            plan = schedule_upgrade.get("plan", {})
+                            if plan:
+                                network_logger.debug(f"Found potential Wasm 'schedule_upgrade' in proposal {prop_id}", plan=plan)
+                                plan_name = plan.get("name")
+                                height_str = plan.get("height")
+                                info_str = plan.get("info", "") # Info might contain version
+
+                                height = 0
+                                try:
+                                    height = int(height_str)
+                                except (ValueError, TypeError):
+                                    network_logger.warning(f"Could not parse height '{height_str}' for Wasm upgrade in prop {prop_id}")
+                                    continue
+
+                                version = None
+                                search_text = f"{plan_name} {info_str}"
+                                versions = SEMANTIC_VERSION_PATTERN.findall(search_text)
+                                if versions:
+                                    network_repo_semver_tags = get_network_repo_semver_tags(network_name, network_repo_url)
+                                    version = find_best_semver_for_versions(network_name, versions, network_repo_semver_tags)
+
+                                if version and height > 0:
+                                    network_logger.info(f"Found {network_name} upgrade via CosmWasm (Wasm Execute): Name={plan_name}, Version={version}, Height={height}")
+                                    return plan_name, version, height
+                                else:
+                                     network_logger.debug(f"Wasm plan found in {prop_id} but missing version or valid height", name=plan_name, version=version, height=height)
+
+                    except Exception as decode_err:
+                        network_logger.debug(f"Error decoding/parsing Wasm execute msg for proposal {prop_id}", error=str(decode_err))
+                        continue
+
+        network_logger.debug("No suitable software upgrade message found in recent CosmWasm proposals.")
+        return None, None, None
+
+    except requests.exceptions.RequestException as e:
+        status_code = "N/A"
+        response_text = "N/A"
+        if e.response is not None:
+            status_code = e.response.status_code
+            try:
+                # Try to get response text, but handle cases where it might not be text/JSON
+                response_text = e.response.text
+            except Exception:
+                response_text = "(Could not decode response body)"
+
+        network_logger.error(
+            f"RequestException during {network_name} CosmWasm query",
+            server=rest_url,
+            contract=contract_address,
+            api_url=api_url, # Log the exact URL queried
+            status_code=status_code,
+            response_body=response_text[:500], # Log first 500 chars of response
+            error=str(e),
+        )
+        return None, None, None
+    except Exception as e:
+        network_logger.error(
+            f"Unhandled error during {network_name} CosmWasm query",
+            server=rest_url, contract=contract_address, api_url=api_url, error=str(e), trace=traceback.format_exc(),
+        )
+        return None, None, None
+
+def estimate_upgrade_time(latest_block_time, past_block_time, latest_block_height, upgrade_block_height):
+    """Estimate the upgrade time based on block times and heights."""
+    if not latest_block_time or not past_block_time or upgrade_block_height is None:
+        return None  # Return None if any required value is missing
+
+    # Parse block times as UTC
+    latest_block_datetime = parse_isoformat_string(latest_block_time)
+    past_block_datetime = parse_isoformat_string(past_block_time)
+
+    # Calculate average block time
+    avg_block_time_seconds = (latest_block_datetime - past_block_datetime).total_seconds() / 10000
+
+    # Estimate upgrade time
+    blocks_until_upgrade = upgrade_block_height - latest_block_height
+    estimated_seconds_until_upgrade = avg_block_time_seconds * blocks_until_upgrade
+    estimated_upgrade_datetime = datetime.utcnow() + timedelta(seconds=estimated_seconds_until_upgrade)
+
+    return estimated_upgrade_datetime.isoformat().replace("+00:00", "Z")
+
+def parse_isoformat_string(date_string):
+    date_string = re.sub(r"(\.\d{6})\d+Z", r"\1Z", date_string)
+    # The microseconds MUST be 6 digits long
+    if "." in date_string and len(date_string.split(".")[1]) != 7 and date_string.endswith("Z"):
+        micros = date_string.split(".")[-1][:-1]
+        date_string = date_string.replace(micros, micros.ljust(6, "0"))
+    date_string = date_string.replace("Z", "+00:00")
+    return datetime.fromisoformat(date_string)
+
+def parse_stargate_msg_software_upgrade(msg_value_base64):
+    """Parses a base64 encoded MsgSoftwareUpgrade proto message."""
+    try:
+        decoded_bytes = base64.b64decode(msg_value_base64)
+        decoded_str = decoded_bytes.decode('latin-1')  # Use latin-1 to avoid decode errors
+        plan_match = re.search(r'plan.*name.*"(v[^"]+)".*height.*(\d+)', decoded_str, re.IGNORECASE | re.DOTALL)
+        if plan_match:
+            name_approx = plan_match.group(1)
+            height_approx = int(plan_match.group(2))
+            logger.warning("Using unreliable regex parsing for Stargate MsgSoftwareUpgrade", name=name_approx, height=height_approx)
+            return name_approx, name_approx, height_approx
+    except Exception as e:
+        logger.error("Failed during Stargate message parsing", error=str(e))
+    return None, None, None
 
 def reorder_data(data):
     ordered_data = OrderedDict(
