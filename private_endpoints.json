@@ -18,5 +18,9 @@
   "thorchain": {
     "rpc": ["https://thornode-mainnet-rpc.bryanlabs.net"],
     "rest": ["https://thornode-mainnet-api.bryanlabs.net"]
+  },
+  "lavatestnet1": {
+    "rpc": ["https://lava-testnet-rpc.polkachu.com"],
+    "rest": ["https://lava-testnet-api.polkachu.com"]
   }
 }
