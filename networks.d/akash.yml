@@ -1,0 +1,5 @@
+---
+network:
+  name: akash
+  chain_id: akashnet-1
+  rpc_url: https://rpc.lavenderfive.com:443/akash

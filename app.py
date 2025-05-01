@@ -1,3 +1,4 @@
+import glob
 import requests
 import re
 from datetime import datetime
@@ -16,11 +17,20 @@ import os
 import json
 import subprocess
 import semantic_version
+import yaml
 
 app = Flask(__name__)
 
 # Logging configuration
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+formatter = logging.Formatter('[%(asctime)s] %(levelname)s | %(message)s')
+
+# Create console handler and set level to info
+ch = logging.StreamHandler()
+ch.setLevel(logging.INFO)
+ch.setFormatter(formatter)
+logger.addHandler(ch)
 
 # Suppress only the single InsecureRequestWarning from urllib3
 requests.packages.urllib3.disable_warnings(requests.packages.urllib3.exceptions.InsecureRequestWarning)
@@ -37,6 +47,8 @@ num_workers = int(os.environ.get("NUM_WORKERS", 10))
 
 GITHUB_API_URL = "https://api.github.com"
 GITHUB_API_BASE_URL = GITHUB_API_URL + "/repos/cosmos/chain-registry/contents"
+MAINNET_WEBHOOK_URL = ""
+TESTNET_WEBHOOK_URL = ""
 
 # these servers have given consistent error responses, this list is used to skip them
 SERVER_BLACKLIST = [
@@ -897,7 +909,35 @@ def get_testnet_data():
     return Response(json.dumps(reordered_results) + "\n", content_type="application/json")
 
 
+def update_global(name: str, value):
+    globals()[name] = value
+
+
+def read_config():
+    with open("config.yml", "r") as f:
+        config = yaml.safe_load(f)
+
+        # Discord alerts configuration
+        if discord_config := config.get("alerts", {}).get("discord", {}):
+            if discord_config.get("enabled"):
+                update_global("MAINNET_WEBHOOK_URL", discord_config.get("mainnet_webhook"))
+                update_global("TESTNET_WEBHOOK_URL", discord_config.get("testnet_webhook"))
+
+
+def read_networks() -> list:
+    chains = []
+    chains_dir = "networks.d"
+    for file_path in glob.glob(os.path.join(chains_dir, "*")):
+        with open(file_path, "r") as f:
+            file_content = yaml.safe_load(f)
+            network = file_content["network"]
+            chains.append(network)
+    return chains
+
+
 if __name__ == "__main__":
     app.debug = True
     start_update_data_thread()
     app.run(host="0.0.0.0", use_reloader=False)
+else:
+    start_update_data_thread()

@@ -1,0 +1,6 @@
+---
+alerts:
+  discord:
+    enabled: true
+    mainnet_webhook: ''
+    testnet_webhook: ''
