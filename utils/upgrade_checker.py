@@ -14,13 +14,13 @@ class RequiresGovV1Exception(Exception):
 def check_proposal_for_upgrade(proposal, network, network_repo_url, get_network_repo_semver_tags, find_best_semver_for_versions):
     """
     Checks a single proposal for upgrade information
-    
+
     Returns:
         Tuple of (plan_name, version, height) or (None, None, None) if no upgrade is found
     """
     network_logger = logger.bind(network=network.upper())
     proposal_id = proposal.get("id", "N/A")
-    
+
     # For v1 proposals
     messages = proposal.get("messages", [])
     for message in messages:
@@ -76,7 +76,7 @@ def check_proposal_for_upgrade(proposal, network, network_repo_url, get_network_
             if version and height > 0:
                 network_logger.trace(f"Returning valid upgrade found in proposal {proposal_id}", name=plan_name, version=version, height=height)
                 return plan_name, version, height
-    
+
     # For v1beta1 proposals
     content = proposal.get("content", {})
     proposal_type = content.get("@type")
@@ -100,19 +100,19 @@ def check_proposal_for_upgrade(proposal, network, network_repo_url, get_network_
 
         if version and height > 0:
             return plan_name, version, height
-    
+
     return None, None, None
 
 def fetch_proposals_by_status(rest_url, status, network, network_logger):
     """
     Fetch all proposals with a given status
-    
+
     Args:
         rest_url: REST API endpoint
         status: Status code ("2" for active, "3" for passed)
         network: Network name
         network_logger: Logger instance
-        
+
     Returns:
         List of proposals or empty list on error
     """
@@ -135,7 +135,7 @@ def fetch_proposals_by_status(rest_url, status, network, network_logger):
 
             response.raise_for_status()
             data = response.json()
-            
+
             page_proposals = data.get("proposals", [])
             if page_proposals:
                 all_proposals.extend(page_proposals)
@@ -164,7 +164,7 @@ def fetch_proposals_by_status(rest_url, status, network, network_logger):
                 trace=traceback.format_exc()
             )
             return []
-            
+
     return all_proposals
 
 def fetch_proposals_beta1_by_status(rest_url, status, network, network_logger):
@@ -189,7 +189,7 @@ def fetch_proposals_beta1_by_status(rest_url, status, network, network_logger):
         response.raise_for_status()
         data = response.json()
         return data.get("proposals", [])
-        
+
     except RequiresGovV1Exception:
         raise
     except Exception as e:

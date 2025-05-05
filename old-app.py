@@ -293,7 +293,7 @@ def fetch_endpoints(network, base_url):
     except requests.RequestException as e:
         logger.error("Error fetching endpoints", error=str(e))
         return [], []
-    
+
 def fetch_active_upgrade_proposals(rest_url, network, network_repo_url):
     network_logger = logger.bind(network=network.upper())  # Bind the network name to the logger
     try:
@@ -302,7 +302,7 @@ def fetch_active_upgrade_proposals(rest_url, network, network_repo_url):
         [plan_name, version, height] = fetch_active_upgrade_proposals_v1(rest_url, network, network_repo_url)
     except Exception as e:
         raise e
-    
+
     return plan_name, version, height
 
 
@@ -381,7 +381,7 @@ def fetch_active_upgrade_proposals_v1beta1(rest_url, network, network_repo_url):
             trace=traceback.format_exc()
         )
         raise e
-    
+
 def fetch_active_upgrade_proposals_v1(rest_url, network, network_repo_url):
     network_logger = logger.bind(network=network.upper())  # Add logger binding
     try:

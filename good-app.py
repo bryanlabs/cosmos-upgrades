@@ -344,7 +344,7 @@ def fetch_endpoints(network, base_url):
     except requests.RequestException as e:
         logger.error("Error fetching endpoints", error=str(e))
         return [], []
-    
+
 def fetch_active_upgrade_proposals(rest_url, network, network_repo_url):
     network_logger = logger.bind(network=network.upper())
     try:
@@ -353,7 +353,7 @@ def fetch_active_upgrade_proposals(rest_url, network, network_repo_url):
         [plan_name, version, height] = fetch_active_upgrade_proposals_v1(rest_url, network, network_repo_url)
     except Exception as e:
         raise e
-    
+
     return plan_name, version, height
 
 
@@ -426,7 +426,7 @@ def fetch_active_upgrade_proposals_v1beta1(rest_url, network, network_repo_url):
             trace=traceback.format_exc()
         )
         raise e
-    
+
 def fetch_active_upgrade_proposals_v1(rest_url, network, network_repo_url):
     network_logger = logger.bind(network=network.upper())
     proposal_statuses_to_check = ["2", "3"]
@@ -1025,7 +1025,7 @@ def fetch_data_for_network(network, network_type, repo_path):
         active_upgrade_name, active_upgrade_version, active_upgrade_height = None, None, None
         current_upgrade_name, current_upgrade_version, current_upgrade_height, current_plan_dump = None, None, None, None
         cosmwasm_upgrade_name, cosmwasm_upgrade_version, cosmwasm_upgrade_height = None, None, None
-        
+
         # --- 1. Check Active/Passed Proposals ---
         if network not in NETWORKS_NO_GOV_MODULE:
             try:
@@ -1034,7 +1034,7 @@ def fetch_data_for_network(network, network_type, repo_path):
                     active_upgrade_name, active_upgrade_version, active_upgrade_height
                 ) = fetch_active_upgrade_proposals(current_endpoint, network, network_repo_url)
                 network_logger.trace(
-                    "Standard active/passed proposal result", 
+                    "Standard active/passed proposal result",
                     name=active_upgrade_name,
                     version=active_upgrade_version,
                     height=active_upgrade_height

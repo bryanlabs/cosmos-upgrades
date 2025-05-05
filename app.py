@@ -590,7 +590,7 @@ def fetch_active_upgrade_proposals_v1beta1(rest_url, network, network_repo_url):
             trace=traceback.format_exc()
         )
         raise e
-    
+
 def fetch_active_upgrade_proposals_v1(rest_url, network, network_repo_url):
     network_logger = logger.bind(network=network.upper())  # Add logger binding
     try:
@@ -827,7 +827,7 @@ def fetch_current_upgrade_plan(rest_url, network, network_repo_url):
             trace=traceback.format_exc()
         )
         raise e
-    
+
 def fetch_cosmwasm_upgrade_proposal(rest_url, contract_address, query_type, network_name, network_repo_url):
     """
     Fetches software upgrade proposals from a CosmWasm governance contract.
