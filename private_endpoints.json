@@ -1,0 +1,26 @@
+{
+  "osmosis": {
+    "rpc": ["https://osmosis-rpc.bryanlabs.net"],
+    "rest": ["https://osmosis-api.bryanlabs.net"]
+  },
+  "cosmoshub": {
+    "rpc": ["https://gaia-rpc.bryanlabs.net"],
+    "rest": ["https://gaia-api.bryanlabs.net"]
+  },
+  "odin": {
+    "rpc": ["https://odin-rpc.bryanlabs.net"],
+    "rest": ["https://odin-api.bryanlabs.net"]
+  },
+  "kujira": {
+    "rpc": ["https://kujira-rpc.bryanlabs.net"],
+    "rest": ["https://kujira-api.bryanlabs.net"]
+  },
+  "thorchain": {
+    "rpc": ["https://thornode-mainnet-rpc.bryanlabs.net"],
+    "rest": ["https://thornode-mainnet-api.bryanlabs.net"]
+  },
+  "lavatestnet1": {
+    "rpc": ["https://lava-testnet-rpc.polkachu.com"],
+    "rest": ["https://lava-testnet-api.polkachu.com"]
+  }
+}

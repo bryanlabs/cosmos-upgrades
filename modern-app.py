@@ -1375,25 +1375,22 @@ def update_data():
     global CHAIN_WATCH
     network_blacklist_set = {net.strip().upper() for net in NETWORK_BLACKLIST if net.strip()}
 
-    while True: # This loop is intended to run indefinitely
+    while True:
         start_time = datetime.now()
         global_logger.info("Starting data update cycle...")
         global_logger.debug(f"CHAIN_WATCH content in update_data: {CHAIN_WATCH}")
 
         try:
-            # --- Repo Fetching ---
             repo_path = fetch_repo()
             global_logger.info("Repo path fetched")
             sleep(0.1)
         except Exception as e:
-            # Log repo fetch error and continue to the next iteration after sleeping
             global_logger.error("Error downloading and extracting repo", error=str(e))
             global_logger.info(f"Sleeping for {UPDATE_INTERVAL_SECONDS} seconds before retrying...")
             sleep(UPDATE_INTERVAL_SECONDS)
-            continue # Skips the rest of the current loop iteration and starts the next one
+            continue
 
         try:
-            # --- Network Discovery and Filtering ---
             mainnet_networks_all = [
                 d
                 for d in os.listdir(repo_path)
@@ -1513,11 +1510,11 @@ def update_data():
                     )
                 )
 
-            # --- Caching Results ---
+            # Set data in cache with timeout based on DATA_CACHE_TIMEOUT_SECONDS
             cache.set("MAINNET_DATA", mainnet_data, timeout=DATA_CACHE_TIMEOUT_SECONDS)
             cache.set("TESTNET_DATA", testnet_data, timeout=DATA_CACHE_TIMEOUT_SECONDS)
 
-            # --- Logging Completion and Sleeping ---
+            # Log completion
             elapsed_time = (datetime.now() - start_time).total_seconds()
             minutes, seconds = divmod(int(elapsed_time), 60)
             time_format = f"{minutes}m {seconds}s" if minutes > 0 else f"{seconds}s"
@@ -1527,20 +1524,16 @@ def update_data():
                 f"Data update cycle completed in {time_format} (avg: {avg_time_per_network:.2f}s per network). Sleeping for {UPDATE_INTERVAL_SECONDS} seconds...",
                 elapsed_time=elapsed_time,
             )
-            sleep(UPDATE_INTERVAL_SECONDS) # Pause before the next iteration
-
+            sleep(UPDATE_INTERVAL_SECONDS)
         except Exception as e:
-            # Log general errors during the processing/caching phase
             elapsed_time = (datetime.now() - start_time).total_seconds()
             global_logger.exception("Error in update_data loop", elapsed_time=elapsed_time, error=str(e))
-            # Sleep before retrying the entire loop
             global_logger.info(f"Sleeping for {UPDATE_INTERVAL_SECONDS} seconds before retrying...")
             sleep(UPDATE_INTERVAL_SECONDS)
-            # The loop continues implicitly here, starting the next iteration
 
 def start_update_data_thread():
     update_thread = threading.Thread(target=update_data)
-    update_thread.daemon = True # This thread will exit if the main application exits
+    update_thread.daemon = True
     update_thread.start()
 
 @app.route("/healthz")

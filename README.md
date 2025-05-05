@@ -2,6 +2,15 @@
 
 `cosmos-upgrades` is a powerful tool developed by [bryanlabs](https://github.com/bryanlabs) to search for scheduled Cosmos upgrades. This tool aims to streamline the process of tracking and managing upgrades in the Cosmos ecosystem.
 
+It checks multiple sources for upgrade information:
+
+1.  **Current Upgrade Plan:** Queries the `/cosmos/upgrade/v1beta1/current_plan` endpoint.
+2.  **Active Proposals:** Queries `/cosmos/gov/v1/proposals` (or `v1beta1` as fallback) for proposals in `PROPOSAL_STATUS_VOTING_PERIOD` (2).
+3.  **Passed Proposals:** Queries `/cosmos/gov/v1/proposals` (or `v1beta1` as fallback) for proposals in `PROPOSAL_STATUS_PASSED` (3). This helps find upgrades approved but not yet reflected in the `current_plan`.
+4.  **CosmWasm Governance:** For specific chains (like Neutron), queries designated governance smart contracts for upgrade proposals.
+
+The tool prioritizes upgrades scheduled for a future block height. If multiple future upgrades are found, it prioritizes them in the order listed above. If no future upgrade is found, it falls back to reporting the `current_plan` (even if the height is in the past), then the most recent passed/active proposal, then the most recent CosmWasm proposal.
+
 ## 🌌 Introduction
 
 The Cosmos ecosystem is vast and ever-evolving. With frequent upgrades and enhancements, it becomes crucial for stakeholders to keep track of scheduled upgrades. `cosmos-upgrades` bridges this gap by providing a centralized solution to fetch and monitor these upgrades.
@@ -31,6 +40,43 @@ If a particular network or chain is not present in the `chain-registry`, the `co
 
 By doing so, not only do you enhance the tool's capabilities, but you also contribute to the broader Cosmos community.
 
+## 🔒 Using Private Endpoints
+
+If you operate your own RPC and REST endpoints for Cosmos chains, you can configure the tool to prioritize these private endpoints over the ones in the chain registry.
+
+### Setting Up Private Endpoints
+
+1. Create or modify the `private_endpoints.json` file in the root directory with your private endpoint information:
+
+```json
+{
+  "osmosis": {
+    "rpc": ["https://my-private-osmosis-rpc.example.com"],
+    "rest": ["https://my-private-osmosis-rest.example.com"]
+  },
+  "cosmoshub": {
+    "rpc": ["https://my-private-cosmoshub-rpc.example.com:26657", "https://my-backup-cosmoshub-rpc.example.com:26657"],
+    "rest": ["https://my-private-cosmoshub-rest.example.com:1317"]
+  }
+}
+```
+
+2. The tool will automatically detect and prioritize these endpoints during the data fetching process.
+
+3. You can specify a custom path for this file using the `PRIVATE_ENDPOINTS_FILE` environment variable in `.env`:
+
+```
+PRIVATE_ENDPOINTS_FILE=/path/to/my/private_endpoints.json
+```
+
+### Benefits of Private Endpoints
+
+- **Reliability:** Use your own infrastructure for critical monitoring
+- **Reduced Latency:** Private endpoints may be faster than public ones
+- **Customization:** Easily switch between different endpoint configurations
+
+The tool will always check your private endpoints first, and fall back to chain registry endpoints if yours are unavailable.
+
 ## 🚀 Making Requests
 
 To fetch the scheduled upgrades, you can use the following `curl` command for both mainnets and testnets:
@@ -55,7 +101,7 @@ curl -s -X GET \
 
 ## 🧪 Automated Script (`upgrades.sh`)
 
-`upgrades.sh` is a convenient script provided to fetch scheduled upgrades for both mainnets and testnets. It offers customization options and simplifies the process of tracking upgrades.
+`upgrades.sh` is a convenient script provided to fetch scheduled upgrades for both mainnets and testnets. It offers customization options and simplifies the process of tracking upgrades by querying the API endpoints.
 
 ### Usage
 
