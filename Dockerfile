@@ -1,37 +1,27 @@
-# Stage 1: Install dependencies
-FROM python:3.9-alpine AS builder
+# Use a Python image with uv pre-installed
+FROM ghcr.io/astral-sh/uv:python3.13-bookworm-slim
 
-# Install build dependencies
-RUN apk add --no-cache gcc musl-dev libffi-dev openssl-dev git
-
-# Set working directory
 WORKDIR /app
 
-# Copy requirements and install dependencies
-COPY requirements.txt .
-RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
+ENV UV_COMPILE_BYTECODE=1
 
-# Stage 2: Final image
-FROM python:3.9-alpine
+ENV UV_LINK_MODE=copy
 
-# Install runtime dependencies
-RUN apk add --no-cache git
+RUN --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=bind,source=uv.lock,target=uv.lock \
+    --mount=type=bind,source=pyproject.toml,target=pyproject.toml \
+    uv sync --frozen --no-install-project --no-dev
 
-# Set environment variables
-ENV PYTHONDONTWRITEBYTECODE=1
-ENV PYTHONUNBUFFERED=1
+ADD . /app
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --frozen --no-dev
 
-# Set working directory
-WORKDIR /app
+ENV PATH="/app/.venv/bin:$PATH"
 
-# Copy installed dependencies from builder
-COPY --from=builder /install /usr/local
-
-# Copy application code
 COPY . .
 
-# Expose port
 EXPOSE 5000
 
-# Run the application
-CMD ["python", "app.py"]
+ENTRYPOINT [ "uv" ]
+
+CMD [ "run", "gunicorn", "--bind", "0.0.0.0:5000", "app:app"]
