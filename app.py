@@ -19,9 +19,23 @@ import sys
 from loguru import logger
 from dotenv import load_dotenv, find_dotenv
 import base64
+import signal
 
 # Load environment variables from .env file explicitly
 load_dotenv(find_dotenv(), override=True)
+
+# Signal handler to reap zombie processes
+def sigchld_handler(signum, frame):
+    while True:
+        try:
+            pid, _ = os.waitpid(-1, os.WNOHANG)
+            if pid == 0:
+                break
+        except OSError:
+            break
+
+# Install signal handler
+signal.signal(signal.SIGCHLD, sigchld_handler)
 
 # --- Configuration Loading ---
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
@@ -259,14 +273,35 @@ def get_chain_watch_env_var():
 def fetch_repo():
     """Clone or update the chain registry repository."""
     repo_clone_url = CHAIN_REGISTRY_REPO_URL
-    repo_dir = os.path.join(os.getcwd(), CHAIN_REGISTRY_DIR_NAME)
+    # Use /cr directory if it exists (Kubernetes), otherwise use current directory
+    base_dir = "/cr" if os.path.exists("/cr") and os.access("/cr", os.W_OK) else os.getcwd()
+    repo_dir = os.path.join(base_dir, CHAIN_REGISTRY_DIR_NAME)
     try:
         if os.path.exists(repo_dir):
-            subprocess.run(["git", "-C", repo_dir, "pull"], check=True)
+            # Add timeout and capture output to prevent hanging
+            result = subprocess.run(
+                ["git", "-C", repo_dir, "pull"],
+                check=True,
+                timeout=30,  # 30 second timeout
+                capture_output=True,
+                text=True
+            )
+            logger.debug(f"Git pull completed: {result.stdout}")
         else:
-            subprocess.run(["git", "clone", repo_clone_url, repo_dir], check=True)
+            # Clone with timeout
+            result = subprocess.run(
+                ["git", "clone", repo_clone_url, repo_dir],
+                check=True,
+                timeout=60,  # 60 second timeout for clone
+                capture_output=True,
+                text=True
+            )
+            logger.debug(f"Git clone completed: {result.stdout}")
+    except subprocess.TimeoutExpired as e:
+        logger.error(f"Git command timed out after {e.timeout} seconds", command=' '.join(e.cmd))
+        raise Exception(f"Git command timed out: {e}")
     except subprocess.CalledProcessError as e:
-        logger.error("Failed to fetch the repository", error=str(e))
+        logger.error("Failed to fetch the repository", error=str(e), stderr=e.stderr if hasattr(e, 'stderr') else None)
         raise Exception(f"Failed to fetch the repository: {e}")
     return repo_dir
 
