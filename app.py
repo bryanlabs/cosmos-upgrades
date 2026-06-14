@@ -345,7 +345,7 @@ def get_network_timeout(network, default_timeout, timeout_type="status"):
     return default_timeout
 
 
-def get_healthy_rpc_endpoints(rpc_endpoints, network=None):
+def get_healthy_rpc_endpoints(rpc_endpoints, network=None, expected_chain_id=None):
     # First inject private RPC endpoints if available for this network
     private_rpcs = []
     if network and network in private_endpoints and "rpc" in private_endpoints[network]:
@@ -360,7 +360,7 @@ def get_healthy_rpc_endpoints(rpc_endpoints, network=None):
         healthy_rpc_endpoints = [
             rpc
             for rpc, is_healthy in executor.map(
-                lambda rpc: (rpc, is_rpc_endpoint_healthy(rpc["address"], network)), combined_endpoints
+                lambda rpc: (rpc, is_rpc_endpoint_healthy(rpc["address"], network, expected_chain_id)), combined_endpoints
             )
             if is_healthy
         ]
@@ -373,7 +373,7 @@ def get_healthy_rpc_endpoints(rpc_endpoints, network=None):
     return healthy_rpc_endpoints[:MAX_HEALTHY_ENDPOINTS]
 
 
-def get_healthy_rest_endpoints(rest_endpoints, network=None):
+def get_healthy_rest_endpoints(rest_endpoints, network=None, expected_chain_id=None):
     # First inject private REST endpoints if available for this network
     private_rests = []
     if network and network in private_endpoints and "rest" in private_endpoints[network]:
@@ -388,7 +388,7 @@ def get_healthy_rest_endpoints(rest_endpoints, network=None):
         healthy_rest_endpoints = [
             rest
             for rest, is_healthy in executor.map(
-                lambda rest: (rest, is_rest_endpoint_healthy(rest["address"], network)),
+                lambda rest: (rest, is_rest_endpoint_healthy(rest["address"], network, expected_chain_id)),
                 combined_endpoints,
             )
             if is_healthy
@@ -402,7 +402,7 @@ def get_healthy_rest_endpoints(rest_endpoints, network=None):
     return healthy_rest_endpoints[:MAX_HEALTHY_ENDPOINTS]
 
 
-def is_rpc_endpoint_healthy(endpoint, network=None):
+def is_rpc_endpoint_healthy(endpoint, network=None, expected_chain_id=None):
     timeout = get_network_timeout(network, HEALTH_CHECK_TIMEOUT_SECONDS, "health_check")
     network_logger = logger.bind(network=network.upper() if network else "UNKNOWN", progress="")
 
@@ -414,6 +414,19 @@ def is_rpc_endpoint_healthy(endpoint, network=None):
         if response.status_code != 200:
             response = requests.get(f"{endpoint}/health", timeout=timeout, verify=False)
         result = response.status_code == 200
+
+        if result and expected_chain_id:
+            status_resp = requests.get(f"{endpoint}/status", timeout=timeout, verify=False)
+            if status_resp.status_code == 200:
+                data = status_resp.json()
+                if "result" in data:
+                    data = data["result"]
+                actual_chain_id = data.get("node_info", {}).get("network", "")
+                if actual_chain_id and actual_chain_id != expected_chain_id:
+                    network_logger.warning(
+                        f"RPC chain-id mismatch for {endpoint}: expected {expected_chain_id}, got {actual_chain_id}"
+                    )
+                    result = False
 
         if network and network.lower() in NETWORK_DIAGNOSTICS:
             duration = (datetime.now() - start_time).total_seconds()
@@ -432,7 +445,7 @@ def is_rpc_endpoint_healthy(endpoint, network=None):
         return False
 
 
-def is_rest_endpoint_healthy(endpoint, network=None):
+def is_rest_endpoint_healthy(endpoint, network=None, expected_chain_id=None):
     timeout = get_network_timeout(network, HEALTH_CHECK_TIMEOUT_SECONDS, "health_check")
     network_logger = logger.bind(network=network.upper() if network else "UNKNOWN", progress="")
 
@@ -448,6 +461,20 @@ def is_rest_endpoint_healthy(endpoint, network=None):
                 verify=False,
             )
         result = response.status_code == 200
+
+        if result and expected_chain_id:
+            node_info_resp = requests.get(
+                f"{endpoint}/cosmos/base/tendermint/v1beta1/node_info",
+                timeout=timeout,
+                verify=False,
+            )
+            if node_info_resp.status_code == 200:
+                actual_chain_id = node_info_resp.json().get("default_node_info", {}).get("network", "")
+                if actual_chain_id and actual_chain_id != expected_chain_id:
+                    network_logger.warning(
+                        f"REST chain-id mismatch for {endpoint}: expected {expected_chain_id}, got {actual_chain_id}"
+                    )
+                    result = False
 
         if network and network.lower() in NETWORK_DIAGNOSTICS:
             duration = (datetime.now() - start_time).total_seconds()
@@ -1050,6 +1077,7 @@ def reorder_data(data):
         [
             ("type", data.get("type")),
             ("network", data.get("network")),
+            ("chain_id", data.get("chain_id")),
             ("rpc_server", data.get("rpc_server")),
             ("rest_server", data.get("rest_server")),
             ("latest_block_height", data.get("latest_block_height")),
@@ -1106,6 +1134,7 @@ def fetch_data_for_network(network, network_type, repo_path, custom_logger=None,
 
     rest_endpoints = data.get("apis", {}).get("rest", [])
     rpc_endpoints = data.get("apis", {}).get("rpc", [])
+    expected_chain_id = data.get("chain_id")
 
     logo_urls = fetch_logo_urls(data)
     network_logger.trace("Fetched logo URLs", urls=logo_urls)
@@ -1117,13 +1146,13 @@ def fetch_data_for_network(network, network_type, repo_path, custom_logger=None,
 
     # Add timing for RPC endpoints health check
     rpc_health_start = datetime.now()
-    healthy_rpc_endpoints = get_healthy_rpc_endpoints(rpc_endpoints, network)
+    healthy_rpc_endpoints = get_healthy_rpc_endpoints(rpc_endpoints, network, expected_chain_id)
     rpc_health_duration = (datetime.now() - rpc_health_start).total_seconds()
     network_logger.debug(f"RPC health check took {rpc_health_duration:.2f}s, found {len(healthy_rpc_endpoints)} healthy endpoints")
 
     # Add timing for REST endpoints health check
     rest_health_start = datetime.now()
-    healthy_rest_endpoints = get_healthy_rest_endpoints(rest_endpoints, network)
+    healthy_rest_endpoints = get_healthy_rest_endpoints(rest_endpoints, network, expected_chain_id)
     rest_health_duration = (datetime.now() - rest_health_start).total_seconds()
     network_logger.debug(f"REST health check took {rest_health_duration:.2f}s, found {len(healthy_rest_endpoints)} healthy endpoints")
 
@@ -1372,6 +1401,7 @@ def fetch_data_for_network(network, network_type, repo_path, custom_logger=None,
     final_output_data = {
         "network": network,
         "type": network_type,
+        "chain_id": expected_chain_id,
         "rpc_server": rpc_server_used,
         "rest_server": rest_server_used,
         "latest_block_height": latest_block_height,
