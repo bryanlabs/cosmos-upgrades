@@ -7,7 +7,7 @@ import traceback
 import threading
 from flask import Flask, jsonify, request, Response
 from flask_caching import Cache
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, wait
 from time import sleep
 from collections import OrderedDict
 import os
@@ -52,7 +52,17 @@ SERVER_BLACKLIST = [srv.strip() for srv in SERVER_BLACKLIST_CSV.split(",") if sr
 NETWORKS_NO_GOV_MODULE_CSV = os.environ.get("NETWORKS_NO_GOV_MODULE_CSV", "noble,nobletestnet")
 NETWORKS_NO_GOV_MODULE = [net.strip() for net in NETWORKS_NO_GOV_MODULE_CSV.split(",") if net.strip()]
 PRIVATE_ENDPOINTS_FILE = os.environ.get("PRIVATE_ENDPOINTS_FILE", "private_endpoints.json")
-COSMWASM_GOV_CONFIG_JSON = os.environ.get("COSMWASM_GOV_CONFIG_JSON", '{"neutron": {"contract_address": "neutron1suhgf5svhu4usrurvxzlgn54ksxmn8gljarjtxqnapv8kjnp4nrs7d743d", "query_type": "list_proposals"}}')
+COSMWASM_GOV_CONFIG_JSON = os.environ.get("COSMWASM_GOV_CONFIG_JSON", '''{
+  "neutron": {
+    "dao_core": "neutron1suhgf5svhu4usrurvxzlgn54ksxmn8gljarjtxqnapv8kjnp4nrstdxvff",
+    "proposal_modules": [
+      "neutron1436kxs0w2es6xlqpp9rd35e3d0cjnw4sv8j3a7483sgks29jqwgshlt6zh",
+      "neutron1pvrwmjuusn9wh34j7y520g8gumuy9xtl3gvprlljfdpwju3x7ucsj3fj40",
+      "neutron12pwnhtv7yat2s30xuf4gdk9qm85v4j3e6p44let47pdffpklcxlq56v0te"
+    ],
+    "query_type": "reverse_proposals"
+  }
+}''')
 try:
     COSMWASM_GOV_CONFIG = json.loads(COSMWASM_GOV_CONFIG_JSON)
 except json.JSONDecodeError:
@@ -65,6 +75,10 @@ HEALTH_CHECK_TIMEOUT_SECONDS = int(os.environ.get("HEALTH_CHECK_TIMEOUT_SECONDS"
 BLOCK_FETCH_TIMEOUT_SECONDS = int(os.environ.get("BLOCK_FETCH_TIMEOUT_SECONDS", 2))
 STATUS_TIMEOUT_SECONDS = int(os.environ.get("STATUS_TIMEOUT_SECONDS", 1)) # Timeout for /status endpoint
 COSMWASM_TIMEOUT_SECONDS = int(os.environ.get("COSMWASM_TIMEOUT_SECONDS", 10))
+GOV_QUERY_TIMEOUT_SECONDS = int(os.environ.get("GOV_QUERY_TIMEOUT_SECONDS", 10))
+GITHUB_API_TIMEOUT_SECONDS = int(os.environ.get("GITHUB_API_TIMEOUT_SECONDS", 10))
+GITHUB_TAGS_MAX_PAGES = int(os.environ.get("GITHUB_TAGS_MAX_PAGES", 20))
+NETWORK_PROCESSING_TIMEOUT_SECONDS = int(os.environ.get("NETWORK_PROCESSING_TIMEOUT_SECONDS", 300))
 MAX_HEALTHY_ENDPOINTS = int(os.environ.get("MAX_HEALTHY_ENDPOINTS", 5))
 BLOCK_RANGE_FOR_AVG_TIME = int(os.environ.get("BLOCK_RANGE_FOR_AVG_TIME", 10000))
 TAG_CACHE_TIMEOUT_SECONDS = int(os.environ.get("TAG_CACHE_TIMEOUT_SECONDS", 3600))
@@ -75,7 +89,8 @@ EXPLORER_HEALTH_TIMEOUT_SECONDS = int(os.environ.get("EXPLORER_HEALTH_TIMEOUT_SE
 # --- Cache Configuration ---
 CACHE_TYPE = os.environ.get("CACHE_TYPE", "simple")
 CACHE_DIR = os.environ.get("CACHE_DIR", "/tmp/cosmos-upgrades-cache") # Default if not set
-DATA_CACHE_TIMEOUT_SECONDS = int(os.environ.get("DATA_CACHE_TIMEOUT_SECONDS", 600)) # Load the new timeout
+DATA_CACHE_TIMEOUT_SECONDS = int(os.environ.get("DATA_CACHE_TIMEOUT_SECONDS", 1800)) # 30 minutes for safety margin
+DATA_SNAPSHOT_FILE_ENV = os.environ.get("DATA_SNAPSHOT_FILE")
 # --- End Configuration Loading ---
 
 # Add API key configuration
@@ -186,6 +201,7 @@ logger.info(f"Server Blacklist Count: {len(SERVER_BLACKLIST)}")
 logger.info(f"Update Interval: {UPDATE_INTERVAL_SECONDS}s")
 logger.info(f"Max Healthy Endpoints: {MAX_HEALTHY_ENDPOINTS}")
 logger.info(f"Worker Threads: {NUM_WORKERS}")
+logger.info(f"Network Processing Timeout: {NETWORK_PROCESSING_TIMEOUT_SECONDS}s")
 logger.info(f"Flask Host: {FLASK_HOST}")
 logger.info(f"Flask Port: {FLASK_PORT}")
 
@@ -238,6 +254,72 @@ else:
 logger.info(f"--- End Configuration ---") # Separator after config logs
 
 cache = Cache(app, config=cache_config)
+DATA_SNAPSHOT_FILE = DATA_SNAPSHOT_FILE_ENV or os.path.join(final_cache_dir or CACHE_DIR, "last_good_data.json")
+
+# Global variables for tracking data freshness and fallback
+last_successful_update = None
+last_known_good_mainnet_data = []
+last_known_good_testnet_data = []
+update_thread_alive = False
+
+def persist_last_good_data(mainnet_data, testnet_data):
+    """Persist last-good API data so restarts do not serve empty responses."""
+    if not mainnet_data and not testnet_data:
+        logger.warning("Skipping last-good data snapshot because both result sets are empty")
+        return
+
+    snapshot = {
+        "timestamp": datetime.now().isoformat(),
+        "mainnets": mainnet_data,
+        "testnets": testnet_data,
+    }
+    snapshot_dir = os.path.dirname(DATA_SNAPSHOT_FILE)
+    if snapshot_dir:
+        os.makedirs(snapshot_dir, exist_ok=True)
+    temp_path = f"{DATA_SNAPSHOT_FILE}.tmp"
+    with open(temp_path, "w") as snapshot_file:
+        json.dump(snapshot, snapshot_file)
+    os.replace(temp_path, DATA_SNAPSHOT_FILE)
+    logger.info(f"Persisted last-good data snapshot to {DATA_SNAPSHOT_FILE}")
+
+def load_last_good_data_snapshot():
+    """Load last-good API data from disk if a previous pod wrote it."""
+    global last_successful_update, last_known_good_mainnet_data, last_known_good_testnet_data
+
+    if not os.path.exists(DATA_SNAPSHOT_FILE):
+        logger.info(f"No last-good data snapshot found at {DATA_SNAPSHOT_FILE}")
+        return
+
+    try:
+        with open(DATA_SNAPSHOT_FILE, "r") as snapshot_file:
+            snapshot = json.load(snapshot_file)
+
+        mainnet_data = snapshot.get("mainnets", [])
+        testnet_data = snapshot.get("testnets", [])
+        if not isinstance(mainnet_data, list) or not isinstance(testnet_data, list):
+            logger.warning(f"Ignoring invalid last-good data snapshot at {DATA_SNAPSHOT_FILE}")
+            return
+
+        last_known_good_mainnet_data = mainnet_data
+        last_known_good_testnet_data = testnet_data
+        timestamp = snapshot.get("timestamp")
+        if timestamp:
+            try:
+                last_successful_update = datetime.fromisoformat(timestamp)
+            except ValueError:
+                last_successful_update = datetime.now()
+        else:
+            last_successful_update = datetime.now()
+
+        cache.set("MAINNET_DATA", mainnet_data, timeout=DATA_CACHE_TIMEOUT_SECONDS)
+        cache.set("TESTNET_DATA", testnet_data, timeout=DATA_CACHE_TIMEOUT_SECONDS)
+        logger.info(
+            f"Loaded last-good data snapshot with {len(mainnet_data)} mainnets and {len(testnet_data)} testnets"
+        )
+    except Exception as e:
+        logger.warning(f"Failed to load last-good data snapshot from {DATA_SNAPSHOT_FILE}: {str(e)}")
+
+load_last_good_data_snapshot()
 
 # Middleware for API key verification
 def verify_api_key():
@@ -254,6 +336,9 @@ def verify_api_key():
 CHAIN_WATCH = []
 
 SEMANTIC_VERSION_PATTERN = re.compile(r"(v\d+(?:\.\d+){0,2})")
+
+class RequiresGovV1Exception(Exception):
+    pass
 
 def get_chain_watch_env_var():
     chain_watch_str = os.environ.get("CHAIN_WATCH", "")
@@ -554,12 +639,14 @@ def fetch_active_upgrade_proposals_v1beta1(rest_url, network, network_repo_url):
     network_logger = logger.bind(network=network.upper())  # Add logger binding
     try:
         response = requests.get(
-            f"{rest_url}/cosmos/gov/v1beta1/proposals?proposal_status=2", verify=False
+            f"{rest_url}/cosmos/gov/v1beta1/proposals?proposal_status=2",
+            timeout=GOV_QUERY_TIMEOUT_SECONDS,
+            verify=False,
         )
 
         # Handle 501 Server Error
         if response.status_code == 501:
-            return None, None
+            return None, None, None
 
         # check if the endpoint requires v1 instead of v1beta1
         if response.status_code != 200:
@@ -630,12 +717,14 @@ def fetch_active_upgrade_proposals_v1(rest_url, network, network_repo_url):
     network_logger = logger.bind(network=network.upper())  # Add logger binding
     try:
         response = requests.get(
-            f"{rest_url}/cosmos/gov/v1/proposals?proposal_status=2", verify=False
+            f"{rest_url}/cosmos/gov/v1/proposals?proposal_status=2",
+            timeout=GOV_QUERY_TIMEOUT_SECONDS,
+            verify=False,
         )
 
         # Handle 501 Server Error
         if response.status_code == 501:
-            return None, None
+            return None, None, None
 
         response.raise_for_status()
         data = response.json()
@@ -774,11 +863,15 @@ def fetch_network_repo_tags(network, network_repo):
             repo_owner = repo_parts[-2]
             tags_url = f"{GITHUB_API_URL}/repos/{repo_owner}/{repo_name}/tags"
             tags = []
-            while tags_url:
-                response = requests.get(tags_url)
+            pages_fetched = 0
+            while tags_url and pages_fetched < GITHUB_TAGS_MAX_PAGES:
+                response = requests.get(tags_url, timeout=GITHUB_API_TIMEOUT_SECONDS)
                 response.raise_for_status()
                 tags.extend(response.json())
                 tags_url = response.links.get("next", {}).get("url")
+                pages_fetched += 1
+            if tags_url:
+                logger.warning("Stopped fetching tags after max page limit", network=network, max_pages=GITHUB_TAGS_MAX_PAGES)
             return [tag["name"] for tag in tags]
         except Exception as e:
             logger.error("Error fetching tags", network=network, error=str(e))
@@ -818,7 +911,9 @@ def fetch_current_upgrade_plan(rest_url, network, network_repo_url):
     network_logger = logger.bind(network=network.upper())  # Bind the network name to the logger
     try:
         response = requests.get(
-            f"{rest_url}/cosmos/upgrade/v1beta1/current_plan", verify=False
+            f"{rest_url}/cosmos/upgrade/v1beta1/current_plan",
+            timeout=GOV_QUERY_TIMEOUT_SECONDS,
+            verify=False,
         )
         response.raise_for_status()
         data = response.json()
@@ -863,144 +958,171 @@ def fetch_current_upgrade_plan(rest_url, network, network_repo_url):
         )
         raise e
 
-def fetch_cosmwasm_upgrade_proposal(rest_url, contract_address, query_type, network_name, network_repo_url):
+def fetch_cosmwasm_upgrade_proposal(rest_url, config, network_name, network_repo_url):
     """
-    Fetches software upgrade proposals from a CosmWasm governance contract.
+    Fetches software upgrade proposals from CosmWasm governance contracts.
+    For Neutron, queries multiple proposal modules.
     """
     network_logger = logger.bind(network=network_name.upper())
-    network_logger.debug(f"Attempting CosmWasm query '{query_type}' for {network_name} gov contract {contract_address} at {rest_url}")
-
-    # --- Construct Query ---
-    # Adapt query based on query_type, assuming list_proposals for now
-    if query_type == "list_proposals":
-         # Query last ~20 proposals, hoping active ones are recent. Add pagination if needed.
-        query_msg = {"list_proposals": {"limit": 20}}
+    
+    # Handle both old and new config formats
+    if "contract_address" in config:
+        # Old format - single contract
+        proposal_modules = [config["contract_address"]]
+        query_type = config.get("query_type", "list_proposals")
     else:
-        network_logger.error(f"Unsupported CosmWasm query type: {query_type}")
+        # New format - multiple proposal modules
+        proposal_modules = config.get("proposal_modules", [])
+        query_type = config.get("query_type", "reverse_proposals")
+    
+    if not proposal_modules:
+        network_logger.error("No proposal modules configured for CosmWasm governance")
         return None, None, None
+    
+    network_logger.debug(f"Checking {len(proposal_modules)} proposal modules for {network_name}")
+    
+    # Try each proposal module
+    for module_address in proposal_modules:
+        network_logger.debug(f"Querying proposal module: {module_address}")
+        
+        # Construct query based on type
+        if query_type == "reverse_proposals":
+            query_msg = {"reverse_proposals": {}}
+        elif query_type == "list_proposals":
+            query_msg = {"list_proposals": {"limit": 20}}
+        else:
+            network_logger.error(f"Unsupported query type: {query_type}")
+            continue
+        
+        query_msg_json = json.dumps(query_msg)
+        query_msg_base64 = base64.b64encode(query_msg_json.encode('utf-8')).decode('utf-8')
+        api_url = f"{rest_url}/cosmwasm/wasm/v1/contract/{module_address}/smart/{query_msg_base64}"
+        
+        try:
+            response = requests.get(api_url, timeout=COSMWASM_TIMEOUT_SECONDS, verify=False)
+            response.raise_for_status()
+            data = response.json()
+            
+            proposals_data = data.get("data", {}).get("proposals", [])
+            network_logger.debug(f"Found {len(proposals_data)} proposals in module {module_address}")
 
-    query_msg_json = json.dumps(query_msg)
-    query_msg_base64 = base64.b64encode(query_msg_json.encode('utf-8')).decode('utf-8')
-    api_url = f"{rest_url}/cosmwasm/wasm/v1/contract/{contract_address}/smart/{query_msg_base64}"
+            # Iterate proposals in reverse (newest first)
+            for prop_container in reversed(proposals_data):
+                proposal = prop_container.get("proposal", {})
+                prop_id = prop_container.get("id")
+                status = proposal.get("status", "unknown").lower()
 
-    try:
-        response = requests.get(api_url, timeout=10, verify=False) # Increased timeout
-        response.raise_for_status()
-        data = response.json()
+                # Only consider proposals that might be active or recently passed
+                # Adjust statuses based on the specific contract's state machine
+                if status not in ["open", "passed", "executed", "neutron.cron.Schedule"]: # Neutron might use Schedule status
+                    network_logger.debug(f"Skipping proposal {prop_id} with status '{status}'")
+                    continue
 
-        proposals_data = data.get("data", {}).get("proposals", [])
-        network_logger.debug(f"Found {len(proposals_data)} proposals via CosmWasm query")
-
-        # Iterate proposals in reverse (newest first)
-        for prop_container in reversed(proposals_data):
-            proposal = prop_container.get("proposal", {})
-            prop_id = prop_container.get("id")
-            status = proposal.get("status", "unknown").lower()
-
-            # Only consider proposals that might be active or recently passed
-            # Adjust statuses based on the specific contract's state machine
-            if status not in ["open", "passed", "executed", "neutron.cron.Schedule"]: # Neutron might use Schedule status
-                network_logger.debug(f"Skipping proposal {prop_id} with status '{status}'")
-                continue
-
-            network_logger.debug(f"Checking proposal ID {prop_id} with status '{status}'")
-
-            msgs = proposal.get("msgs", [])
-            for msg_container in msgs:
-                # Check for Stargate message first (more standard)
-                stargate_msg = msg_container.get("stargate")
-                if stargate_msg:
-                    type_url = stargate_msg.get("type_url")
-                    value_b64 = stargate_msg.get("value")
-                    if type_url == "/cosmos.upgrade.v1beta1.MsgSoftwareUpgrade" and value_b64:
-                        network_logger.debug(f"Found Stargate MsgSoftwareUpgrade in proposal {prop_id}")
-                        # Attempt to parse the base64 value
-                        # NOTE: Proper protobuf parsing is needed here for reliability.
-                        # Using a placeholder regex approach for now.
-                        plan_name_approx, version_approx, height_approx = parse_stargate_msg_software_upgrade(value_b64)
-
-                        if height_approx and height_approx > 0:
-                             # Use the approximate version found by regex
-                             version = version_approx # Or try to refine using find_best_semver_for_versions if needed
-                             if version:
-                                 network_logger.info(f"Found {network_name} upgrade via CosmWasm (Stargate): Name={plan_name_approx}, Version={version}, Height={height_approx}")
-                                 return plan_name_approx, version, height_approx
-                             else:
-                                 network_logger.warning(f"Could not determine version for Stargate upgrade in prop {prop_id}")
-                        continue # Move to next message if parsing failed
-
-                # Placeholder: Check for Wasm Execute message (less standard for x/upgrade)
-                wasm_execute = msg_container.get("wasm", {}).get("execute", {})
-                if wasm_execute:
-                    try:
-                        inner_msg_b64 = wasm_execute.get("msg")
-                        if inner_msg_b64:
-                            inner_msg_json = base64.b64decode(inner_msg_b64).decode('utf-8')
-                            inner_msg = json.loads(inner_msg_json)
-
-                            # Look for a specific pattern like 'schedule_upgrade'
-                            schedule_upgrade = inner_msg.get("schedule_upgrade", {})
-                            plan = schedule_upgrade.get("plan", {})
-                            if plan:
-                                network_logger.debug(f"Found potential Wasm 'schedule_upgrade' in proposal {prop_id}", plan=plan)
-                                plan_name = plan.get("name")
-                                height_str = plan.get("height")
-                                info_str = plan.get("info", "") # Info might contain version
-
-                                height = 0
-                                try:
-                                    height = int(height_str)
-                                except (ValueError, TypeError):
-                                    network_logger.warning(f"Could not parse height '{height_str}' for Wasm upgrade in prop {prop_id}")
-                                    continue
-
-                                version = None
-                                search_text = f"{plan_name} {info_str}"
-                                versions = SEMANTIC_VERSION_PATTERN.findall(search_text)
-                                if versions:
-                                    network_repo_semver_tags = get_network_repo_semver_tags(network_name, network_repo_url)
-                                    version = find_best_semver_for_versions(network_name, versions, network_repo_semver_tags)
-
-                                if version and height > 0:
-                                    network_logger.info(f"Found {network_name} upgrade via CosmWasm (Wasm Execute): Name={plan_name}, Version={version}, Height={height}")
-                                    return plan_name, version, height
+                network_logger.debug(f"Checking proposal ID {prop_id} with status '{status}'")
+                
+                msgs = proposal.get("msgs", [])
+                for msg_container in msgs:
+                    # Check for Stargate message first (more standard)
+                    stargate_msg = msg_container.get("stargate")
+                    if stargate_msg:
+                        type_url = stargate_msg.get("type_url")
+                        value_b64 = stargate_msg.get("value")
+                        if type_url == "/cosmos.upgrade.v1beta1.MsgSoftwareUpgrade" and value_b64:
+                            network_logger.debug(f"Found Stargate MsgSoftwareUpgrade in proposal {prop_id}")
+                            # Attempt to parse the base64 value
+                            # NOTE: Proper protobuf parsing is needed here for reliability.
+                            # Using a placeholder regex approach for now.
+                            plan_name_approx, version_approx, height_approx = parse_stargate_msg_software_upgrade(value_b64)
+                            
+                            if height_approx and height_approx > 0:
+                                # Use the approximate version found by regex
+                                version = version_approx # Or try to refine using find_best_semver_for_versions if needed
+                                if version:
+                                    network_logger.info(f"Found {network_name} upgrade via CosmWasm (Stargate): Name={plan_name_approx}, Version={version}, Height={height_approx}")
+                                    return plan_name_approx, version, height_approx
                                 else:
-                                     network_logger.debug(f"Wasm plan found in {prop_id} but missing version or valid height", name=plan_name, version=version, height=height)
+                                    network_logger.warning(f"Could not determine version for Stargate upgrade in prop {prop_id}")
+                            continue # Move to next message if parsing failed
 
-                    except Exception as decode_err:
-                        network_logger.debug(f"Error decoding/parsing Wasm execute msg for proposal {prop_id}", error=str(decode_err))
-                        continue
+                    # Placeholder: Check for Wasm Execute message (less standard for x/upgrade)
+                    wasm_execute = msg_container.get("wasm", {}).get("execute", {})
+                    if wasm_execute:
+                        try:
+                            inner_msg_b64 = wasm_execute.get("msg")
+                            if inner_msg_b64:
+                                inner_msg_json = base64.b64decode(inner_msg_b64).decode('utf-8')
+                                inner_msg = json.loads(inner_msg_json)
 
-        network_logger.debug("No suitable software upgrade message found in recent CosmWasm proposals.")
-        return None, None, None
+                                # Look for a specific pattern like 'schedule_upgrade'
+                                schedule_upgrade = inner_msg.get("schedule_upgrade", {})
+                                plan = schedule_upgrade.get("plan", {})
+                                if plan:
+                                    network_logger.debug(f"Found potential Wasm 'schedule_upgrade' in proposal {prop_id}", plan=plan)
+                                    plan_name = plan.get("name")
+                                    height_str = plan.get("height")
+                                    info_str = plan.get("info", "") # Info might contain version
+                                    
+                                    height = 0
+                                    try:
+                                        height = int(height_str)
+                                    except (ValueError, TypeError):
+                                        network_logger.warning(f"Could not parse height '{height_str}' for Wasm upgrade in prop {prop_id}")
+                                        continue
+                                    
+                                    version = None
+                                    search_text = f"{plan_name} {info_str}"
+                                    versions = SEMANTIC_VERSION_PATTERN.findall(search_text)
+                                    if versions:
+                                        network_repo_semver_tags = get_network_repo_semver_tags(network_name, network_repo_url)
+                                        version = find_best_semver_for_versions(network_name, versions, network_repo_semver_tags)
+                                    
+                                    if version and height > 0:
+                                        network_logger.info(f"Found {network_name} upgrade via CosmWasm (Wasm Execute): Name={plan_name}, Version={version}, Height={height}")
+                                        return plan_name, version, height
+                                    else:
+                                        network_logger.debug(f"Wasm plan found in {prop_id} but missing version or valid height", name=plan_name, version=version, height=height)
+                        
+                        except Exception as decode_err:
+                            network_logger.debug(f"Error decoding/parsing Wasm execute msg for proposal {prop_id}", error=str(decode_err))
+                            continue
 
-    except requests.exceptions.RequestException as e:
-        status_code = "N/A"
-        response_text = "N/A"
-        if e.response is not None:
-            status_code = e.response.status_code
-            try:
-                # Try to get response text, but handle cases where it might not be text/JSON
-                response_text = e.response.text
-            except Exception:
-                response_text = "(Could not decode response body)"
-
-        network_logger.error(
-            f"RequestException during {network_name} CosmWasm query",
-            server=rest_url,
-            contract=contract_address,
-            api_url=api_url, # Log the exact URL queried
-            status_code=status_code,
-            response_body=response_text[:500], # Log first 500 chars of response
-            error=str(e),
-        )
-        return None, None, None
-    except Exception as e:
-        network_logger.error(
-            f"Unhandled error during {network_name} CosmWasm query",
-            server=rest_url, contract=contract_address, api_url=api_url, error=str(e), trace=traceback.format_exc(),
-        )
-        return None, None, None
+            # No upgrade found in this module, continue to next
+            network_logger.debug(f"No suitable upgrade found in module {module_address}")
+            
+        except requests.exceptions.RequestException as e:
+            status_code = "N/A"
+            response_text = "N/A"
+            if e.response is not None:
+                status_code = e.response.status_code
+                try:
+                    # Try to get response text, but handle cases where it might not be text/JSON
+                    response_text = e.response.text
+                except Exception:
+                    response_text = "(Could not decode response body)"
+            
+            network_logger.error(
+                f"RequestException during {network_name} CosmWasm query",
+                server=rest_url,
+                contract=module_address,
+                api_url=api_url, # Log the exact URL queried
+                status_code=status_code,
+                response_body=response_text[:500], # Log first 500 chars of response
+                error=str(e),
+            )
+            # Continue to next module on error
+            continue
+            
+        except Exception as e:
+            network_logger.error(
+                f"Unhandled error during {network_name} CosmWasm query",
+                server=rest_url, contract=module_address, api_url=api_url, error=str(e), trace=traceback.format_exc(),
+            )
+            # Continue to next module on error
+            continue
+    
+    # If we've tried all modules and found nothing
+    network_logger.debug(f"No suitable software upgrade found in any of {len(proposal_modules)} CosmWasm proposal modules")
+    return None, None, None
 
 def estimate_upgrade_time(latest_block_time, past_block_time, latest_block_height, upgrade_block_height):
     """Estimate the upgrade time based on block times and heights."""
@@ -1289,8 +1411,7 @@ def fetch_data_for_network(network, network_type, repo_path, custom_logger=None,
                     cosmwasm_upgrade_name, cosmwasm_upgrade_version, cosmwasm_upgrade_height
                 ) = fetch_cosmwasm_upgrade_proposal(
                     current_endpoint,
-                    config["contract_address"],
-                    config["query_type"],
+                    config,
                     network,
                     network_repo_url
                 )
@@ -1407,8 +1528,9 @@ def fetch_data_for_network(network, network_type, repo_path, custom_logger=None,
 # periodic cache update
 def update_data():
     global_logger = logger.bind(network="GLOBAL", progress="")
-    global CHAIN_WATCH
+    global CHAIN_WATCH, update_thread_alive
     network_blacklist_set = {net.strip().upper() for net in NETWORK_BLACKLIST if net.strip()}
+    update_thread_alive = True
 
     while True: # This loop is intended to run indefinitely
         start_time = datetime.now()
@@ -1487,70 +1609,106 @@ def update_data():
 
             # Create progress counter and lock
             completed_networks = 0
+            started_networks = 0
             progress_lock = threading.Lock()
 
-            # Modify the process_network_with_progress function
-            def process_network_with_progress(network, network_type):
-                # Calculate progress text first
+            def next_progress_text():
+                nonlocal started_networks
+                with progress_lock:
+                    started_networks += 1
+                    return f"{started_networks}/{total_networks}" if total_networks > 0 else "0/0"
+
+            def mark_network_finished():
                 nonlocal completed_networks
                 with progress_lock:
                     completed_networks += 1
-                    percent = completed_networks / total_networks * 100 if total_networks > 0 else 100
-                    progress_text = f"{completed_networks}/{total_networks}" # Store progress text
+                    return completed_networks
 
-                result = None
+            def process_network_with_progress(network, network_type):
+                progress_text = next_progress_text()
                 try:
                     # Pass progress_text to fetch_data_for_network
-                    result = fetch_data_for_network(network, network_type, repo_path, progress_text=progress_text)
+                    return fetch_data_for_network(network, network_type, repo_path, progress_text=progress_text)
                 except Exception as e:
                     # Log error with network context, progress will be empty here
                     error_logger = logger.bind(network=network.upper(), progress="")
                     error_logger.error(f"Error processing network {network}: {str(e)}")
+                    return None
 
-                return result
+            def process_network_batch(networks, network_type):
+                batch_results = []
+                if not networks:
+                    return batch_results
+
+                worker_count = max(1, NUM_WORKERS)
+                for batch_start in range(0, len(networks), worker_count):
+                    batch = networks[batch_start:batch_start + worker_count]
+                    executor = ThreadPoolExecutor(max_workers=min(worker_count, len(batch)))
+                    futures = {
+                        executor.submit(process_network_with_progress, network, network_type): network
+                        for network in batch
+                    }
+                    done, not_done = wait(futures, timeout=NETWORK_PROCESSING_TIMEOUT_SECONDS)
+
+                    for future in done:
+                        network = futures[future]
+                        finished = mark_network_finished()
+                        try:
+                            result = future.result()
+                        except Exception as e:
+                            logger.bind(network=network.upper(), progress=f"{finished}/{total_networks}").error(
+                                f"Unhandled error collecting network result: {str(e)}"
+                            )
+                            continue
+                        if result:
+                            batch_results.append(result)
+
+                    for future in not_done:
+                        network = futures[future]
+                        future.cancel()
+                        finished = mark_network_finished()
+                        logger.bind(network=network.upper(), progress=f"{finished}/{total_networks}").error(
+                            f"Timed out processing network after {NETWORK_PROCESSING_TIMEOUT_SECONDS}s; skipping this cycle"
+                        )
+
+                    executor.shutdown(wait=False, cancel_futures=True)
+
+                return batch_results
 
             # Add a watchdog timer to detect if processing hangs
             def watchdog_timer():
                 last_completed = 0
-                while completed_networks < total_networks:
+                while True:
                     sleep(60)  # Check every minute
-                    if completed_networks == last_completed:
-                        global_logger.warning(f"Processing appears to be stuck at {completed_networks}/{total_networks} networks")
-                    last_completed = completed_networks
+                    with progress_lock:
+                        current_completed = completed_networks
+                    if current_completed >= total_networks:
+                        break
+                    if current_completed == last_completed:
+                        global_logger.warning(f"Processing appears to be stuck at {current_completed}/{total_networks} networks")
+                    last_completed = current_completed
 
             # Start the watchdog in a separate thread
             watchdog_thread = threading.Thread(target=watchdog_timer)
             watchdog_thread.daemon = True
             watchdog_thread.start()
 
-            with ThreadPoolExecutor(max_workers=NUM_WORKERS) as executor:
-                # Process testnet networks
-                global_logger.debug(f"Submitting {len(testnet_networks)} testnet networks to thread pool")
-                testnet_data = list(
-                    filter(
-                        None,
-                        executor.map(
-                            lambda network: process_network_with_progress(network, "testnet"),
-                            testnet_networks,
-                        ),
-                    )
-                )
+            global_logger.debug(f"Submitting {len(testnet_networks)} testnet networks to bounded batches")
+            testnet_data = process_network_batch(testnet_networks, "testnet")
 
-                # Process mainnet networks
-                global_logger.debug(f"Submitting {len(mainnet_networks)} mainnet networks to thread pool")
-                mainnet_data = list(
-                    filter(
-                        None,
-                        executor.map(
-                            lambda network: process_network_with_progress(network, "mainnet"),
-                            mainnet_networks,
-                        ),
-                    )
-                )
+            global_logger.debug(f"Submitting {len(mainnet_networks)} mainnet networks to bounded batches")
+            mainnet_data = process_network_batch(mainnet_networks, "mainnet")
 
             # --- Caching Results ---
             cache.set("MAINNET_DATA", mainnet_data, timeout=DATA_CACHE_TIMEOUT_SECONDS)
             cache.set("TESTNET_DATA", testnet_data, timeout=DATA_CACHE_TIMEOUT_SECONDS)
+            
+            # Update global tracking variables
+            global last_successful_update, last_known_good_mainnet_data, last_known_good_testnet_data
+            last_successful_update = datetime.now()
+            last_known_good_mainnet_data = mainnet_data
+            last_known_good_testnet_data = testnet_data
+            persist_last_good_data(mainnet_data, testnet_data)
 
             # --- Logging Completion and Sleeping ---
             elapsed_time = (datetime.now() - start_time).total_seconds()
@@ -1582,6 +1740,34 @@ def start_update_data_thread():
 def health_check():
     return jsonify(status="OK"), 200
 
+@app.route("/metrics")
+def metrics():
+    """Endpoint for monitoring data freshness and app health"""
+    global last_successful_update, update_thread_alive
+    
+    metrics_data = {
+        "status": "OK",
+        "cache_timeout_seconds": DATA_CACHE_TIMEOUT_SECONDS,
+        "update_interval_seconds": UPDATE_INTERVAL_SECONDS,
+        "last_successful_update": last_successful_update.isoformat() if last_successful_update else None,
+        "data_age_seconds": (datetime.now() - last_successful_update).total_seconds() if last_successful_update else None,
+        "update_thread_alive": update_thread_alive,
+        "has_fallback_mainnet": bool(last_known_good_mainnet_data),
+        "has_fallback_testnet": bool(last_known_good_testnet_data),
+        "cache_type": CACHE_TYPE
+    }
+    
+    # Determine health status based on data age
+    if last_successful_update:
+        age_seconds = (datetime.now() - last_successful_update).total_seconds()
+        if age_seconds > UPDATE_INTERVAL_SECONDS * 3:  # More than 3 cycles old
+            metrics_data["status"] = "STALE"
+            metrics_data["warning"] = f"Data is {age_seconds:.0f} seconds old"
+    else:
+        metrics_data["status"] = "INITIALIZING"
+    
+    return jsonify(metrics_data), 200
+
 @app.route("/mainnets")
 def get_mainnet_data():
     # API key verification for premium access
@@ -1605,10 +1791,15 @@ def get_mainnet_data():
     # Full access for API key holders
     results = cache.get("MAINNET_DATA")
     if results is None:
-        # Data not in cache (either first run with no persistent data, or expired)
-        # Return empty list while background update runs
-        logger.warning("Mainnet data not found in cache or expired. Background update pending.")
-        return Response(json.dumps([]) + "\n", content_type="application/json")
+        # Try to use last known good data as fallback
+        global last_known_good_mainnet_data
+        if last_known_good_mainnet_data:
+            logger.warning("Mainnet data not in cache, serving stale data from last successful update")
+            results = last_known_good_mainnet_data
+        else:
+            # No fallback available (first run or after restart)
+            logger.warning("Mainnet data not found in cache and no fallback available. Background update pending.")
+            return Response(json.dumps([]) + "\n", content_type="application/json")
 
     # Ensure results is a list, even if cache somehow returns non-list
     if not isinstance(results, list):
@@ -1647,10 +1838,15 @@ def get_testnet_data():
     # Full access for API key holders
     results = cache.get("TESTNET_DATA")
     if results is None:
-        # Data not in cache (either first run with no persistent data, or expired)
-        # Return empty list while background update runs
-        logger.warning("Testnet data not found in cache or expired. Background update pending.")
-        return Response(json.dumps([]) + "\n", content_type="application/json")
+        # Try to use last known good data as fallback
+        global last_known_good_testnet_data
+        if last_known_good_testnet_data:
+            logger.warning("Testnet data not in cache, serving stale data from last successful update")
+            results = last_known_good_testnet_data
+        else:
+            # No fallback available (first run or after restart)
+            logger.warning("Testnet data not found in cache and no fallback available. Background update pending.")
+            return Response(json.dumps([]) + "\n", content_type="application/json")
 
     # Ensure results is a list, even if cache somehow returns non-list
     if not isinstance(results, list):
@@ -1666,22 +1862,110 @@ def get_testnet_data():
         json.dumps(reordered_results) + "\n", content_type="application/json"
     )
 
+def get_cached_upgrade_results(cache_key, fallback_data, label):
+    """Return cached upgrade scan results with last-good fallback."""
+    results = cache.get(cache_key)
+    if results is None:
+        if fallback_data:
+            logger.warning(f"{label} data not in cache, serving stale data from last successful update")
+            results = fallback_data
+        else:
+            logger.warning(f"{label} data not found in cache and no fallback available. Background update pending.")
+            return []
+
+    if not isinstance(results, list):
+        logger.error(f"Unexpected data type found in {label} cache: {type(results)}. Returning empty list.")
+        return []
+
+    return [r for r in results if r is not None]
+
+def normalize_bool_param(value):
+    if value is None or value == "":
+        return None
+    normalized = value.strip().lower()
+    if normalized in ("true", "1", "yes"):
+        return True
+    if normalized in ("false", "0", "no"):
+        return False
+    return None
+
 @app.route("/chains")
 def get_chains():
-    """List all available chains from the chain registry."""
-    try:
-        repo_path = fetch_repo()
-        mainnet_chains = [
-            d for d in os.listdir(repo_path)
-            if os.path.isdir(os.path.join(repo_path, d)) and not d.startswith((".", "_")) and d != "testnets"
+    """Combined upgrade data endpoint for mainnets and testnets.
+
+    Query parameters:
+      type=mainnet|testnet
+      upgrade_found=true|false
+      network=<chain id>
+      limit=<positive integer>
+    """
+    chain_type = request.args.get("type", "").strip().lower()
+    upgrade_found_param = request.args.get("upgrade_found")
+    upgrade_found = normalize_bool_param(upgrade_found_param)
+    network = request.args.get("network", "").strip().lower()
+
+    if chain_type and chain_type not in ("mainnet", "testnet"):
+        return jsonify({"error": "type must be mainnet or testnet"}), 400
+    if (
+        upgrade_found_param is not None
+        and upgrade_found_param.strip() != ""
+        and upgrade_found is None
+    ):
+        return jsonify({"error": "upgrade_found must be true or false"}), 400
+
+    mainnet_results = []
+    testnet_results = []
+    if chain_type in ("", "mainnet"):
+        mainnet_results = [
+            {**result, "type": result.get("type") or "mainnet"}
+            for result in get_cached_upgrade_results(
+                "MAINNET_DATA", last_known_good_mainnet_data, "mainnet"
+            )
         ]
-        testnet_chains = [
-            d for d in os.listdir(os.path.join(repo_path, "testnets"))
-            if os.path.isdir(os.path.join(repo_path, "testnets", d))
+    if chain_type in ("", "testnet"):
+        testnet_results = [
+            {**result, "type": result.get("type") or "testnet"}
+            for result in get_cached_upgrade_results(
+                "TESTNET_DATA", last_known_good_testnet_data, "testnet"
+            )
         ]
-        return jsonify({"mainnets": mainnet_chains, "testnets": testnet_chains}), 200
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+
+    results = mainnet_results + testnet_results
+    if upgrade_found is not None:
+        results = [
+            result for result in results
+            if bool(result.get("upgrade_found", False)) == upgrade_found
+        ]
+    if network:
+        results = [
+            result for result in results
+            if str(result.get("network", "")).lower() == network
+        ]
+
+    sorted_results = sorted(
+        results,
+        key=lambda x: (
+            not bool(x.get("upgrade_found", False)),
+            x.get("estimated_upgrade_time") or "9999",
+            x.get("network") or "",
+        ),
+    )
+    reordered_results = [
+        {**reorder_data(result), "logo_urls": result.get("logo_urls"), "explorer_url": result.get("explorer_url")}
+        for result in sorted_results if result
+    ]
+
+    limit = request.args.get("limit", "").strip()
+    if limit:
+        try:
+            limit_value = int(limit)
+            if limit_value < 1:
+                raise ValueError
+            reordered_results = reordered_results[:limit_value]
+        except ValueError:
+            return jsonify({"error": "limit must be a positive integer"}), 400
+
+    return Response(json.dumps(reordered_results) + "\n", content_type="application/json")
 
 @app.route("/admin/api-keys", methods=["POST"])
 def manage_api_keys():
@@ -1727,9 +2011,6 @@ def get_healthy_explorer(explorers):
     return None
 
 if __name__ == "__main__":
-    class RequiresGovV1Exception(Exception):
-        pass
-
     app.debug = LOG_LEVEL == "DEBUG"
 
     CHAIN_WATCH = get_chain_watch_env_var()
