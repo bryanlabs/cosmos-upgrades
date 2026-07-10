@@ -6,3 +6,6 @@ cosmos-chain-registry*
 __pycache__/*
 chain-registry/
 cache/*
+
+# editor workpsace
+.idea
